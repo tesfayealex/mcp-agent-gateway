@@ -1,0 +1,5 @@
+Ticket: NEX-789
+Summary: Research A2A security models
+Description: Investigate OAuth and other options for securing agent communication.
+Status: To Do
+Refs: a2a_spec.md 

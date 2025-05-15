@@ -1,0 +1,5 @@
+Ticket: NEX-123
+Summary: Fix login button alignment on mobile
+Description: The login button is slightly off-center on screens smaller than 480px.
+Status: Done
+Refs: commit_abc123, PR #45, ui_guidelines.md, login_feature.md 
