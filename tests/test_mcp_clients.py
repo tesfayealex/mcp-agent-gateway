@@ -106,7 +106,7 @@ async def run_tests(args):
         config_file = os.path.join(project_root, "config.json")
 
     logger.info(f"Loading server configurations from: {config_file}")
-    server_configs = load_configs(config_file_path=config_file)
+    server_configs = load_configs(config_path=config_file)
 
     if not server_configs:
         logger.error("No server configurations found. Exiting tester.")

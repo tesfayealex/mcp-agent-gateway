@@ -1,17 +1,17 @@
 [
   {
-    "name": "Local Docker MCP",
+    "name": "LOCAL GITHUB MCP",
     "enabled": true,
     "connection_type": "stdio",
     "stdio_config": {
       "command": "docker",
       "args": [
         "run", "-i", "--rm",
-        "-e", "GITHUB_TOKEN_ENV_VAR_FOR_MCP_PROCESS=ENV_VAR_PLACEHOLDER",
-        "your-mcp-server-image:latest"
+        "-e", "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "github-mcp-server:latest"
       ],
       "env_vars_to_pass": {
-        "GITHUB_TOKEN_ENV_VAR_FOR_MCP_PROCESS": "LOCAL_DOCKER_GITHUB_PAT"
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "LOCAL_DOCKER_GITHUB_PAT"
       }
     },
     "url_config": null,

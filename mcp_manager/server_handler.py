@@ -4,21 +4,24 @@ import os
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
 
-from fastmcp.client import StdioTransport, Client as FastMCPClient, Session as FastMCPSession # Assuming Session for stdio
-import aiohttp # For URL client session management if needed
+from fastmcp.client import StdioTransport, Client as FastMCPClient
+import aiohttp
 
-from .config_loader import ServerConfig, StdioConfig, UrlConfig, AuthConfig
+from .config_loader import ServerConfig
+
+import fastmcp
+
+
 
 logger = logging.getLogger(__name__)
 
 class MCPClientWrapper:
     def __init__(self, server_config: ServerConfig):
         self.config: ServerConfig = server_config
-        self.status: str = "disconnected"  # disconnected, connecting, connected, error, reconnecting
+        self.status: str = "disconnected"
         self._transport: Optional[StdioTransport] = None
-        self._stdio_session: Optional[FastMCPSession] = None # For stdio connections
-        self._http_client: Optional[FastMCPClient] = None # For URL connections
-        self._http_client_session: Optional[aiohttp.ClientSession] = None # For managing underlying aiohttp session for URL client
+        self._http_client: Optional[FastMCPClient] = None
+        self._http_client_session: Optional[aiohttp.ClientSession] = None # For URL client if we manage session separately
         self.last_heartbeat: Optional[datetime] = None
         self.reconnect_attempts: int = 0
 
@@ -33,10 +36,17 @@ class MCPClientWrapper:
     def _get_stdio_env(self) -> Dict[str, str]:
         resolved_env = {}
         if self.config.stdio_config and self.config.stdio_config.env_vars_to_pass:
+            # print("####################################")
+            # print(f"Env vars to pass: {self.config.stdio_config.env_vars_to_pass}")
             for process_var, manager_var_name in self.config.stdio_config.env_vars_to_pass.items():
+                # print(f"------------------------------------")
+                # print(f"Process var: {process_var}")
+                # print(f"Manager var name: {manager_var_name}")
                 value = self._resolve_env_var(manager_var_name)
-                if value is not None: # Only pass var if it resolved
+                if value is not None:
                     resolved_env[process_var] = value
+        # print("####################################")
+        # print(f"Resolved env: {resolved_env}")
         return resolved_env
     
     async def _get_auth_headers(self) -> Optional[Dict[str, str]]:
@@ -53,14 +63,10 @@ class MCPClientWrapper:
 
     async def connect(self) -> bool:
         logger.debug(f"Server '{self.config.name}': connect() called. Current status: {self.status}")
-        # This method attempts a single connection. Retries are handled by ensure_connected.
-        # self.status is typically "connecting" or "reconnecting" when this is called by ensure_connected.
-
+        
         try:
-            # Ensure resources are clean before a new attempt
-            await self._cleanup_resources() # Important for retry scenarios
-            
-            self.status = "connecting" # Set status for this attempt
+            await self._cleanup_resources() # Ensure clean state before new attempt
+            self.status = "connecting"
 
             if self.config.connection_type == "stdio":
                 if not self.config.stdio_config:
@@ -72,53 +78,71 @@ class MCPClientWrapper:
                     args=self.config.stdio_config.args,
                     env=stdio_env,
                 )
-                self._stdio_session = await self._transport.connect_session().__aenter__()
-                await self._stdio_session.list_tools() # Verification call
+                # Perform a quick test to ensure the transport and server can communicate
+                async with self._transport.connect_session() as temp_session:
+                    await temp_session.list_tools()
+                logger.info(f"Server '{self.config.name}' (stdio): Transport initialized and test call successful.")
 
             elif self.config.connection_type == "url":
                 if not self.config.url_config:
                     raise ValueError("UrlConfig is missing for url connection type.")
                 auth_headers = await self._get_auth_headers()
                 logger.debug(f"Server '{self.config.name}': Initializing FastMCPClient for URL: {self.config.url_config.base_url}")
+                
+                # Manage aiohttp.ClientSession explicitly if providing it to FastMCPClient
                 if auth_headers:
                     self._http_client_session = aiohttp.ClientSession(headers=auth_headers)
                     self._http_client = FastMCPClient(base_url=self.config.url_config.base_url, session=self._http_client_session)
                 else:
+                    # If no auth headers, FastMCPClient will create its own session or use a default one.
+                    # We don't need to manage self._http_client_session in this case.
                     self._http_client = FastMCPClient(base_url=self.config.url_config.base_url)
-                await self._http_client.__aenter__()
+                
+                await self._http_client.__aenter__() # Enter context for the client itself
                 await self._http_client.list_tools() # Verification call
+                # Note: _http_client remains active until disconnect. Its __aexit__ will be called in _cleanup_resources.
             else:
                 raise ValueError(f"Unsupported connection type: {self.config.connection_type}")
 
             self.status = "connected"
             self.last_heartbeat = datetime.now(timezone.utc)
-            self.reconnect_attempts = 0 # Reset on any successful connect
-            logger.info(f"Server '{self.config.name}': Successfully connected.")
+            self.reconnect_attempts = 0
+            logger.info(f"Server '{self.config.name}': Successfully connected/initialized.")
             return True
         except Exception as e:
-            logger.error(f"Server '{self.config.name}': Connection attempt failed. Error: {e}", exc_info=False)
-            await self._cleanup_resources() # Ensure cleanup on failure
-            self.status = "error" # Mark as error for this attempt
+            logger.error(f"Server '{self.config.name}': Connection attempt failed. Error: {e}", exc_info=True) # exc_info=True for connection errors
+            await self._cleanup_resources()
+            self.status = "error"
             return False
 
     async def _cleanup_resources(self):
         logger.debug(f"Server '{self.config.name}': Cleaning up resources...")
-        if self._http_client:
-            try: await self._http_client.__aexit__(None, None, None)
-            except Exception as e: logger.error(f"Server '{self.config.name}': Error exiting http client: {e}")
+        
+        if self._http_client: # For URL client
+            try:
+                logger.debug(f"Server '{self.config.name}': Closing FastMCPClient (HTTP)...")
+                await self._http_client.__aexit__(None, None, None) # Exit context for the client
+            except Exception as e:
+                logger.error(f"Server '{self.config.name}': Error exiting http client: {e}", exc_info=True)
             self._http_client = None
-        if self._http_client_session and not self._http_client_session.closed:
-            try: await self._http_client_session.close()
-            except Exception as e: logger.error(f"Server '{self.config.name}': Error closing aiohttp session: {e}")
+
+        if self._http_client_session and not self._http_client_session.closed: # Our own aiohttp session
+            try:
+                logger.debug(f"Server '{self.config.name}': Closing aiohttp.ClientSession...")
+                await self._http_client_session.close()
+            except Exception as e:
+                logger.error(f"Server '{self.config.name}': Error closing aiohttp session: {e}", exc_info=True)
             self._http_client_session = None
-        if self._stdio_session and self._transport: # For stdio, transport manages session lifecyle via context
-            try: await self._transport.connect_session().__aexit__(None, None, None)
-            except Exception as e: logger.error(f"Server '{self.config.name}': Error exiting stdio session via transport: {e}")
-        self._stdio_session = None
-        # StdioTransport itself doesn't have an explicit close if subprocess is managed by Popen and terminated.
-        # If StdioTransport.close() is available and needed for subprocesses, it should be called.
-        # For now, relying on __aexit__ of connect_session() and process termination for cleanup.
-        self._transport = None 
+
+        if self._transport: # For StdioTransport
+            try:
+                logger.debug(f"Server '{self.config.name}': Closing StdioTransport...")
+                # await self._transport.close() # Use transport's close method
+            except Exception as e:
+                logger.error(f"Server '{self.config.name}': Error closing StdioTransport: {e}", exc_info=True)
+            self._transport = None
+        
+        logger.debug(f"Server '{self.config.name}': Resources cleaned.")
 
     async def disconnect(self) -> None:
         logger.info(f"Server '{self.config.name}': Disconnecting...")
@@ -133,17 +157,23 @@ class MCPClientWrapper:
             return []
         try:
             response = None
-            if self.config.connection_type == "stdio" and self._stdio_session:
-                response = await self._stdio_session.list_tools()
+            if self.config.connection_type == "stdio":
+                if not self._transport:
+                    raise ConnectionError(f"Server '{self.config.name}' (stdio): Transport not initialized for list_tools.")
+                logger.debug(f"Server '{self.config.name}' (stdio): Acquiring session for list_tools...")
+                async with self._transport.connect_session() as session:
+                    response = await session.list_tools()
+                logger.debug(f"Server '{self.config.name}' (stdio): Session for list_tools released.")
             elif self.config.connection_type == "url" and self._http_client:
                 response = await self._http_client.list_tools()
             else:
-                raise ConnectionError("No active session/client for list_tools after ensure_connected.")
+                raise ConnectionError(f"Server '{self.config.name}': No active client/transport for list_tools after ensure_connected.")
+            
             self.last_heartbeat = datetime.now(timezone.utc)
             return response.tools if hasattr(response, 'tools') else response
         except Exception as e:
             logger.error(f"Server '{self.config.name}': Error listing tools: {e}", exc_info=True)
-            self.status = "error"
+            self.status = "error" # If an operation fails, mark status as error
             return []
 
     async def call_tool(self, tool_name: str, params: Dict[str, Any]) -> Optional[Any]:
@@ -153,10 +183,16 @@ class MCPClientWrapper:
         try:
             logger.debug(f"Server '{self.config.name}': Calling tool '{tool_name}' with params: {params}")
             result = None
-            if self.config.connection_type == "stdio" and self._stdio_session:
-                result = await self._stdio_session.call_tool(name=tool_name, arguments=params)
+            if self.config.connection_type == "stdio":
+                if not self._transport:
+                    raise ConnectionError(f"Server '{self.config.name}' (stdio): Transport not initialized for call_tool.")
+                logger.debug(f"Server '{self.config.name}' (stdio): Acquiring session for call_tool '{tool_name}'...")
+                async with self._transport.connect_session() as session:
+                    result = await session.call_tool(name=tool_name, arguments=params)
+                logger.debug(f"Server '{self.config.name}' (stdio): Session for call_tool '{tool_name}' released.")
             elif self.config.connection_type == "url" and self._http_client:
-                if hasattr(self._http_client, 'call_tool'):
+                # Assuming FastMCPClient's tool calling mechanism is safe with a long-lived client instance
+                if hasattr(self._http_client, 'call_tool'): # Generic call_tool if available
                     result = await self._http_client.call_tool(name=tool_name, arguments=params)
                 elif hasattr(self._http_client, 'tools') and hasattr(getattr(self._http_client, 'tools'), tool_name):
                     tool_func = getattr(getattr(self._http_client, 'tools'), tool_name)
@@ -164,56 +200,66 @@ class MCPClientWrapper:
                 else:
                     raise NotImplementedError(f"Tool '{tool_name}' call method not found for URL client '{self.config.name}'.")
             else:
-                raise ConnectionError(f"No active session/client for call_tool '{tool_name}' after ensure_connected.")
+                raise ConnectionError(f"Server '{self.config.name}': No active client/transport for call_tool '{tool_name}' after ensure_connected.")
+            
             self.last_heartbeat = datetime.now(timezone.utc)
             return result
         except Exception as e:
             logger.error(f"Server '{self.config.name}': Error calling tool '{tool_name}': {e}", exc_info=True)
-            self.status = "error"
+            self.status = "error" # If an operation fails, mark status as error
             return None
 
     async def check_health(self) -> bool:
+        # ensure_connected will try to (re)initialize transport/client if needed
         if not await self.ensure_connected():
-            logger.warning(f"Server '{self.config.name}': Health check: could not ensure connection.")
+            logger.warning(f"Server '{self.config.name}': Health check: could not ensure connection/initialization.")
             return False
+        
+        # If ensure_connected is true, self.status should be "connected".
+        # Now perform the actual health check operation.
         logger.debug(f"Server '{self.config.name}': Health check: performing list_tools operation...")
-        if await self.list_tools() is not None: # list_tools returns [] on error, so check for not None
-            if self.status == "connected": # list_tools might change status on its own error
-                logger.debug(f"Server '{self.config.name}': Health check successful.")
-                return True
-        logger.warning(f"Server '{self.config.name}': Health check failed (list_tools unsuccessful or status changed). Status: {self.status}")
-        return False
+        
+        # list_tools will attempt to use the connection. It also sets self.status to "error" on failure.
+        await self.list_tools() 
+        
+        if self.status == "connected":
+            logger.debug(f"Server '{self.config.name}': Health check successful (list_tools completed, status is connected).")
+            return True
+        else: # list_tools call failed and changed the status
+            logger.warning(f"Server '{self.config.name}': Health check failed after list_tools. Status: {self.status}")
+            return False
 
     async def ensure_connected(self) -> bool:
+        # This method now ensures the transport (for stdio) or http_client (for url) is initialized and responsive.
         if self.status == "connected":
+            # Perform a quick lightweight check if already "connected" to ensure it's not stale?
+            # For now, assume "connected" status is accurate until next scheduled health check.
             return True
+        
         if self.status == "connecting" or self.status == "reconnecting":
-            logger.debug(f"Server '{self.config.name}': ensure_connected: Connection attempt already in progress ({self.status}).")
+            logger.debug(f"Server '{self.config.name}': ensure_connected: Connection/initialization attempt already in progress ({self.status}).")
             return False 
 
-        logger.info(f"Server '{self.config.name}': ensure_connected: Attempting to establish connection. Retries made so far: {self.reconnect_attempts}")
+        logger.info(f"Server '{self.config.name}': ensure_connected: Attempting to establish connection/initialize. Retries made: {self.reconnect_attempts}/{self.config.max_reconnect_attempts}")
         
-        current_attempt = 0 # Tracks attempts within this call to ensure_connected
         while self.reconnect_attempts < self.config.max_reconnect_attempts:
-            current_attempt +=1
-            if self.reconnect_attempts > 0 or current_attempt > 1: # Don't delay for the very first actual attempt in the lifecycle of this wrapper, unless it's a retry.
+            if self.reconnect_attempts > 0: # Delay for any retry attempt
                  logger.info(f"Server '{self.config.name}': Delaying for {self.config.reconnect_delay_seconds}s before reconnect attempt {self.reconnect_attempts + 1}...")
                  await asyncio.sleep(self.config.reconnect_delay_seconds)
 
-            self.status = "reconnecting" # Explicitly set before connect call
+            self.status = "reconnecting" 
             self.reconnect_attempts += 1
-            logger.info(f"Server '{self.config.name}': Starting connection attempt {self.reconnect_attempts}/{self.config.max_reconnect_attempts}.")
+            logger.info(f"Server '{self.config.name}': Starting connection/initialization attempt {self.reconnect_attempts}/{self.config.max_reconnect_attempts}.")
 
-            if await self.connect(): # connect() now resets its own attempts on success and sets status
+            if await self.connect(): # connect() will set status to "connected" and reset reconnect_attempts on success
                 return True
             
             # connect() failed and set status to "error"
             if self.reconnect_attempts >= self.config.max_reconnect_attempts:
-                logger.error(f"Server '{self.config.name}': All {self.config.max_reconnect_attempts} reconnection attempts failed. Final status: {self.status}")
-                break # Exit while loop
-            # else: continue loop for next attempt
+                logger.error(f"Server '{self.config.name}': All {self.config.max_reconnect_attempts} connection attempts failed. Final status: {self.status}")
+                break 
         
         if self.status != "connected":
-            logger.error(f"Server '{self.config.name}': Failed to connect after {self.reconnect_attempts} attempts. Giving up for now. Status: {self.status}")
-            self.status = "error" # Final confirmation of error status
-        return False
+            logger.error(f"Server '{self.config.name}': Failed to connect/initialize after {self.reconnect_attempts} attempts. Status: {self.status}")
+            self.status = "error" 
+        return self.status == "connected"

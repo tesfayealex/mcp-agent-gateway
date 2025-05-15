@@ -3,6 +3,8 @@ import logging
 import signal
 import os
 import argparse
+import functools
+from typing import Optional
 
 from .config_loader import load_configs
 from .connection_manager import MCPConnectionManager
@@ -18,8 +20,42 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Global event to signal shutdown, accessible by signal handler callback
+shutdown_event_async: Optional[asyncio.Event] = None 
+# Prevent multiple shutdown calls
+shutdown_in_progress = False
+
+async def perform_graceful_shutdown(manager: MCPConnectionManager):
+    global shutdown_in_progress
+    if shutdown_in_progress:
+        logger.info("Shutdown already in progress, ignoring duplicate signal.")
+        return
+    shutdown_in_progress = True
+    
+    logger.info("Graceful shutdown initiated by signal...")
+    
+    if shutdown_event_async: # Check if event is initialized
+        logger.info("Stopping server monitoring...")
+        if manager: # ensure manager exists
+            await manager.stop_monitoring()
+        logger.info("Disconnecting from all servers...")
+        if manager:
+            await manager.disconnect_all_servers()
+        logger.info("Signaling main loop to exit...")
+        shutdown_event_async.set()
+    else:
+        logger.error("Shutdown event not initialized. Cannot proceed with graceful shutdown.")
+
+def signal_handler_callback(signum, manager: MCPConnectionManager):
+    logger.info(f"Received signal {signal.Signals(signum).name}. Scheduling graceful shutdown.")
+    # Schedule the async shutdown process to be run by the loop
+    # Make sure to pass the manager instance if perform_graceful_shutdown needs it.
+    asyncio.create_task(perform_graceful_shutdown(manager))
+
 async def main_async(args):
     """Asynchronous main function."""
+    global shutdown_event_async # Allow modification of the global event
+
     logger.info("Starting MCP Agent Gateway...")
     
     # Determine config file path
@@ -32,25 +68,22 @@ async def main_async(args):
         config_file = os.path.join(base_dir, "config.json")
     
     logger.info(f"Loading server configurations from: {config_file}")
-    server_configs = load_configs(config_file_path=config_file)
+    server_configs = load_configs(config_path=config_file)
 
     if not server_configs:
         logger.error("No server configurations loaded. MCP Agent Gateway will exit.")
         return
 
-    manager = MCPConnectionManager(server_configs=server_configs) # Pass configs directly
+    manager = MCPConnectionManager(server_configs=server_configs)
+    shutdown_event_async = asyncio.Event() # Initialize the event here
 
-    # Setup signal handlers for graceful shutdown
     loop = asyncio.get_running_loop()
-    stop_event_sync = asyncio.Event() # Used to signal main to exit from signal handler
+    
+    # Use functools.partial to pass the manager to the callback
+    handler_with_context = functools.partial(signal_handler_callback, manager=manager)
 
-    def signal_handler(signum, frame):
-        logger.info(f"Received signal {signal.Signals(signum).name}. Initiating graceful shutdown...")
-        # Schedule the async shutdown process to be run by the loop
-        asyncio.create_task(shutdown(manager, stop_event_sync))
-
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, handler_with_context, sig) # Pass sig to handler
 
     logger.info("Connecting to all enabled MCP servers...")
     await manager.connect_all_servers()
@@ -59,18 +92,20 @@ async def main_async(args):
     await manager.start_monitoring(check_interval_seconds=args.interval)
 
     logger.info("MCP Agent Gateway is running. Press Ctrl+C to stop.")
-    await stop_event_sync.wait() # Keep running until shutdown is signalled
+    
+    try:
+        await shutdown_event_async.wait() # Keep running until shutdown is signalled
+    finally:
+        logger.info("Main loop exiting. Cleaning up signal handlers...")
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.remove_signal_handler(sig)
+        # Ensure one final shutdown attempt if not already completed fully, 
+        # though perform_graceful_shutdown should handle most of it.
+        if not shutdown_in_progress: # If shutdown wasn't triggered by signal for some reason
+             logger.info("Main loop cleanup: ensuring shutdown tasks run.")
+             await perform_graceful_shutdown(manager)
 
     logger.info("MCP Agent Gateway has shut down.")
-
-async def shutdown(manager: MCPConnectionManager, stop_event_sync: asyncio.Event):
-    """Handles the graceful shutdown sequence."""
-    logger.info("Stopping server monitoring...")
-    await manager.stop_monitoring()
-    logger.info("Disconnecting from all servers...")
-    await manager.disconnect_all_servers()
-    logger.info("Setting stop event for main loop...")
-    stop_event_sync.set() # Signal the main loop to exit
 
 def main():
     parser = argparse.ArgumentParser(description="MCP Agent Gateway to manage connections to multiple MCP servers.")
