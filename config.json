@@ -1,0 +1,63 @@
+[
+  {
+    "name": "Local Docker MCP",
+    "enabled": true,
+    "connection_type": "stdio",
+    "stdio_config": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "-e", "GITHUB_TOKEN_ENV_VAR_FOR_MCP_PROCESS=ENV_VAR_PLACEHOLDER",
+        "your-mcp-server-image:latest"
+      ],
+      "env_vars_to_pass": {
+        "GITHUB_TOKEN_ENV_VAR_FOR_MCP_PROCESS": "LOCAL_DOCKER_GITHUB_PAT"
+      }
+    },
+    "url_config": null,
+    "authentication": null,
+    "test_tool": {
+        "name": "get_me",
+        "params": {}
+    },
+    "max_reconnect_attempts": 3,
+    "reconnect_delay_seconds": 5
+  },
+  {
+    "name": "Remote Dev MCP",
+    "enabled": false,
+    "connection_type": "url",
+    "stdio_config": null,
+    "url_config": {
+      "base_url": "http://localhost:8080"
+    },
+    "authentication": {
+      "type": "bearer_token",
+      "token_env_var": "REMOTE_DEV_MCP_API_TOKEN"
+    },
+    "test_tool": {
+        "name": "get_me",
+        "params": {}
+    },
+    "max_reconnect_attempts": 3,
+    "reconnect_delay_seconds": 5
+  },
+  {
+    "name": "Disabled Test MCP",
+    "enabled": false,
+    "connection_type": "stdio",
+    "stdio_config": {
+      "command": "echo",
+      "args": ["Hello from disabled MCP"],
+      "env_vars_to_pass": {}
+    },
+    "url_config": null,
+    "authentication": null,
+    "test_tool": {
+        "name": "some_echo_tool",
+        "params": {"message": "test"}
+    },
+    "max_reconnect_attempts": 1,
+    "reconnect_delay_seconds": 5
+  }
+] 

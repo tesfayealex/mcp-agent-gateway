@@ -1,0 +1,1 @@
+# Initializes the mcp_manager package 
