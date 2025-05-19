@@ -147,7 +147,7 @@ if __name__ == '__main__':
         },
         {
             "name": "Remote Dev MCP Test",
-            "enabled": True,
+            "enabled": False,
             "connection_type": "url",
             "url_config": {"base_url": "http://localhost:8080"},
             "authentication": {"type": "bearer_token", "token_env_var": "REMOTE_DEV_MCP_API_TOKEN"},
