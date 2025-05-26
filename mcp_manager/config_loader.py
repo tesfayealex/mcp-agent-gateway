@@ -73,6 +73,7 @@ def load_and_resolve_env_vars(config_data_list: List[Dict[str, Any]]) -> List[Se
                 if value is None:
                     logger.warning(f"Environment variable '{manager_var_name}' not found for server '{config_data.get('name')}' stdio config.")
                 resolved_stdio_env[process_var] = value
+            
             # Replace the original env_vars_to_pass with the actual values (or None if not found)
             # The StdioTransport in fastmcp expects the actual values for its 'env' param.
             # We will pass this resolved dict to ServerHandler and it will use it.
