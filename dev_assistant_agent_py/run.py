@@ -26,6 +26,13 @@ async def main():
     google_api_key = os.getenv("GOOGLE_API_KEY")
     mcp_proxy_url = os.getenv("MCP_PROXY_URL")
     
+    # Ensure MCP proxy URL is in the correct format for the proxy endpoint
+    if mcp_proxy_url and not mcp_proxy_url.endswith('/proxy'):
+        if mcp_proxy_url.endswith('/'):
+            mcp_proxy_url = mcp_proxy_url + 'proxy'
+        else:
+            mcp_proxy_url = mcp_proxy_url + '/proxy'
+    
     # KNOWLEDGE_BASE_PATH from .env is relative to the project root (where .env is)
     knowledge_base_env_path = os.getenv("KNOWLEDGE_BASE_PATH", "./mock_knowledge_base")
     # Resolve its absolute path based on project root (parent of dev_assistant_agent_py)
@@ -42,8 +49,9 @@ async def main():
         logger.error("GOOGLE_API_KEY is not set in the .env file. Agent cannot start.")
         return
     if not mcp_proxy_url:
-        logger.warning("MCP_PROXY_URL is not set in the .env file. MCP tools will not be available.")
-        # Agent might still function with RAG only, depending on design.
+        # MCP Proxy URL is essential for the current agent.create design
+        logger.error("MCP_PROXY_URL is not set in the .env file. Agent cannot start as it relies on MCP tool discovery.")
+        return
 
     logger.info(f"Google API Key: {'Set' if google_api_key else 'Not Set'}")
     logger.info(f"MCP Proxy URL: {mcp_proxy_url}")
@@ -95,40 +103,67 @@ async def main():
     logger.info("RAG query engine ready.")
 
     # 3. Initialize Agent
-    logger.info("Initializing Dev Assistant Agent...")
+    logger.info("Initializing Dev Assistant Agent asynchronously...")
+    dev_assistant = None # Initialize to None for finally block
     try:
-        dev_assistant = DevAssistantAgent(
-            mcp_proxy_url=mcp_proxy_url, # mcp_proxy_url can be None if not set
+        # Use the async factory method to create the agent
+        dev_assistant = await DevAssistantAgent.create(
+            mcp_proxy_url=mcp_proxy_url,
             rag_query_engine=rag_engine,
-            custom_llm=custom_llm, # Main LLM for the agent
-            custom_query_embedder=query_embedder # Query-specific embedder for RAG tool
+            custom_llm=custom_llm,
+            custom_query_embedder=query_embedder
         )
-    except Exception as e:
-        logger.error(f"Failed to initialize DevAssistantAgent: {e}", exc_info=True)
-        return
-    logger.info("Dev Assistant Agent is ready.")
+        logger.info("Dev Assistant Agent is ready.")
 
-    # 4. Interactive Loop
-    print("\nWelcome to the Dev Assistant Agent CLI!")
-    print("Type 'exit' or 'quit' to end the session.")
-    while True:
-        try:
-            user_input = input("You: ")
-            if user_input.lower() in ["exit", "quit"]:
-                print("Exiting agent CLI. Goodbye!")
+        print("\nWelcome to the Dev Assistant Agent CLI!")
+        print("Type 'exit' or 'quit' to end the session.")
+        print("Type 'clear' to clear conversation history.")
+        print("Type 'help' to see available commands.")
+        print("\nThe agent has access to GitHub tools and a local knowledge base.")
+        print("You can ask about repositories, commits, files, issues, PRs, etc.")
+        print("Example: 'get the commit history for repository owner/repo-name'\n")
+        
+        while True:
+            try:
+                user_input = input("You: ")
+                if user_input.lower() in ["exit", "quit"]:
+                    print("Exiting agent CLI. Goodbye!")
+                    break
+                elif user_input.lower() == "clear":
+                    dev_assistant.clear_conversation_history()
+                    print("Agent: Conversation history cleared. Starting fresh!")
+                    continue
+                elif user_input.lower() == "help":
+                    print("\nAvailable commands:")
+                    print("  'exit' or 'quit' - End the session")
+                    print("  'clear' - Clear conversation history")
+                    print("  'help' - Show this help message")
+                    print("\nExample queries:")
+                    print("  'get the commit history for repository owner/repo-name'")
+                    print("  'list files in repository owner/repo-name'")
+                    print("  'search for issues in repository owner/repo-name'")
+                    print("  'tell me about software development best practices' (uses knowledge base)")
+                    continue
+                if not user_input.strip():
+                    continue
+
+                print("Agent: (Processing your request...)")
+                response = await dev_assistant.handle_message(user_input)
+                print(f"Agent: {response}")
+
+            except KeyboardInterrupt:
+                print("\nExiting agent CLI due to interrupt. Goodbye!")
                 break
-            if not user_input.strip():
-                continue
+            except Exception as e:
+                logger.error(f"An error occurred in the interactive loop: {e}", exc_info=True)
+                print("Agent: I encountered an issue. Please try again.")
 
-            response = await dev_assistant.handle_message(user_input)
-            print(f"Agent: {response}")
-
-        except KeyboardInterrupt:
-            print("\nExiting agent CLI due to interrupt. Goodbye!")
-            break
-        except Exception as e:
-            logger.error(f"An error occurred in the interactive loop: {e}", exc_info=True)
-            print("Agent: I encountered an issue. Please try again.")
+    except Exception as e:
+        logger.error(f"Failed to initialize or run DevAssistantAgent: {e}", exc_info=True)
+    finally:
+        if dev_assistant:
+            await dev_assistant.close() # Ensure agent's resources are cleaned up
+        logger.info("Dev Assistant Agent session ended.")
 
 if __name__ == "__main__":
     try:

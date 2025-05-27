@@ -30,7 +30,7 @@ typing_extensions==4.13.2
 uvicorn==0.34.2
 websockets==15.0.1
 aiohttp
-google-generativeai
+google-genai
 llama-index
 llama-index-core
 llama-index-readers-file

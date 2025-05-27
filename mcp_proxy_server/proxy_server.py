@@ -239,7 +239,7 @@ async def call_server_tool(
 
         logger.info(f"Proxying call to '{tool_name}' on server '{server_name}' with args: {arguments}")
         result = await wrapper.call_tool(tool_name=tool_name, params=arguments)
-
+        print(result)
         if wrapper.status == "error" and result is None: 
             return ToolCallResult(success=False, error_message=f"Execution of '{tool_name}' on '{server_name}' failed. Server status: error.")
         

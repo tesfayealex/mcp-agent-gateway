@@ -6,6 +6,7 @@ from llama_index.core import (
     load_index_from_storage,
 )
 from llama_index.core.query_engine import BaseQueryEngine
+from typing import Optional
 # from .custom_embedder import GeminiCustomEmbedding # If run as part of a package
 # from .custom_llm import GeminiCustomLLM # If run as partof a package
 from custom_embedder import GeminiCustomEmbedding # If run directly for testing

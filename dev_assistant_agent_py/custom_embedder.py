@@ -1,148 +1,104 @@
-import google.generativeai as genai
+from google import genai
 from llama_index.core.base.embeddings.base import (
     BaseEmbedding,
     Embedding,
 )
 from typing import List, Any, Optional
+from pydantic import Field, PrivateAttr
 import os
 from dotenv import load_dotenv
 import asyncio
 
-# Corresponds to Gemini's EmbedTextResponse or EmbedContentResponse (BatchEmbedContentsResponse)
-# We need to handle both single text and batch text embeddings.
+# Using the new Google genai client for embeddings
+# Corresponds to the newer Gemini embedding API
 
 class GeminiCustomEmbedding(BaseEmbedding):
-    model_name: str
-    api_key: str
-    task_type: str # e.g., "RETRIEVAL_DOCUMENT", "RETRIEVAL_QUERY", "SEMANTIC_SIMILARITY"
-    title: Optional[str] = None # Optional for RETRIEVAL_DOCUMENT task type
+    model_name: str = Field(description="The name of the Gemini embedding model to use")
+    api_key: str = Field(description="The API key for Google Gemini", exclude=True)
+    task_type: str = Field(default="RETRIEVAL_DOCUMENT", description="Task type for embeddings")
+    title: Optional[str] = Field(default=None, description="Optional title for RETRIEVAL_DOCUMENT task type")
 
-    _model: Any = None # Not storing genai.GenerativeModel, direct calls to genai.embed_content
+    _client: Any = PrivateAttr(default=None)  # Store the genai client
 
     def __init__(
         self,
-        model_name: str, # e.g., "models/embedding-001"
-        api_key: str,
+        model_name: str = "gemini-embedding-exp-03-07", # Updated to use the newer model
+        api_key: str = "",
         task_type: str = "RETRIEVAL_DOCUMENT",
         title: Optional[str] = None,
         **kwargs: Any,
     ):
-        super().__init__(**kwargs)
-        self.model_name = model_name
-        self.api_key = api_key
-        self.task_type = task_type
-        self.title = title
-        genai.configure(api_key=self.api_key) # Ensure API key is configured
+        # Call super().__init__ with explicit field values
+        super().__init__(
+            model_name=model_name,
+            api_key=api_key,
+            task_type=task_type,
+            title=title,
+            **kwargs
+        )
+        
+        # Create the genai client after Pydantic initialization
+        self._client = genai.Client(api_key=self.api_key)
 
     def _get_text_embedding(self, text: str) -> Embedding:
-        response = genai.embed_content(
+        result = self._client.models.embed_content(
             model=self.model_name,
-            content=text,
-            task_type=self.task_type,
-            title=self.title if self.task_type == "RETRIEVAL_DOCUMENT" else None,
+            contents=text,
         )
-        return response["embedding"]
+        return result.embeddings[0].values
 
     async def _aget_text_embedding(self, text: str) -> Embedding:
-        # genai.embed_content is synchronous. To make it truly async for LlamaIndex,
-        # we'd typically run it in a thread pool executor if the underlying SDK call is blocking.
-        # For simplicity here, we'll call the sync version but LlamaIndex expects an awaitable.
-        # A better approach for production would be to use asyncio.to_thread (Python 3.9+)
-        # or a custom thread pool executor for older Python versions.
+        # For async, we'll run the sync method in an executor since the new client doesn't have async methods yet
         loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None, # Default executor (ThreadPoolExecutor)
-            genai.embed_content, # Function to run
-            {
-                'model': self.model_name,
-                'content': text,
-                'task_type': self.task_type,
-                'title': self.title if self.task_type == "RETRIEVAL_DOCUMENT" else None,
-            }
-        )
-        # The response from embed_content when called with a dictionary for its args like this
-        # might be different. The direct call is genai.embed_content(model=..., content=..., ...)
-        # Let's correct to call it directly.
-        response = await loop.run_in_executor(
+        result = await loop.run_in_executor(
             None, 
-            lambda: genai.embed_content(
+            lambda: self._client.models.embed_content(
                 model=self.model_name, 
-                content=text, 
-                task_type=self.task_type, 
-                title=self.title if self.task_type == "RETRIEVAL_DOCUMENT" else None
+                contents=text
             )
         )
-        return response["embedding"]
+        return result.embeddings[0].values
 
     def _get_text_embeddings(self, texts: List[str]) -> List[Embedding]:
-        # The genai.embed_content function can handle a list of strings for batching if the model supports it.
-        # However, the API reference for `embed_content` shows `content` as `Union[str, Iterable[str], ContentDict]`. 
-        # It implies it can take a list directly.
-        # Let's assume it can batch. If not, we would iterate and call _get_text_embedding.
-        # The `batch_embed_contents` might be more appropriate for explicit batching if `embed_content` doesn't batch as expected.
-        # For `embed_content` with a list of strings, it might return a BatchEmbedContentsResponse like structure.
-        # Or it might make multiple calls internally.
-        # Let's use `genai.embed_content` with a list of texts.
-        
-        # According to documentation, for multiple pieces of content, use `embed_contents` (plural)
-        # but the `google-generativeai` SDK has `embed_content` which takes `Union[str, Iterable[str], ContentDict]`
-        # and `batch_embed_contents` for `BatchEmbedContentsRequest`.
-        # Let's assume `embed_content` handles lists of strings correctly and returns a structure with a list of embeddings.
-        
-        # Trying with a loop for clarity and safety, then can optimize if batch is confirmed.
+        # Process texts one by one for now - batch processing might be available later
         embeddings = []
         for text_item in texts:
-            response = genai.embed_content(
+            result = self._client.models.embed_content(
                 model=self.model_name,
-                content=text_item,
-                task_type=self.task_type,
-                title=self.title if self.task_type == "RETRIEVAL_DOCUMENT" else None,
+                contents=text_item,
             )
-            embeddings.append(response["embedding"])
+            embeddings.append(result.embeddings[0].values)
         return embeddings
-        
-        # Potentially more efficient way if embed_content handles batching for lists:
-        # response = genai.embed_content(
-        # model=self.model_name,
-        # content=texts, # Pass the list of texts
-        # task_type=self.task_type,
-        # title=self.title if self.task_type == "RETRIEVAL_DOCUMENT" else None,
-        # )
-        # # The structure of response needs to be checked. If it's like BatchEmbedContentsResponse,
-        # # it would be response["embeddings"], where each item is {"value": [...]}
-        # return [item["value"] for item in response.get("embeddings", [])]
-
 
     async def _aget_text_embeddings(self, texts: List[str]) -> List[Embedding]:
-        # Similar to _aget_text_embedding, run the synchronous batch call in an executor.
-        loop = asyncio.get_event_loop()
-        
-        # Using the loop approach for now.
-        # For true async batching, one would need to check if the SDK offers an async batch method
-        # or parallelize individual async calls (though that might hit rate limits faster).
-        
+        # Process texts one by one using async single embedding method
         embeddings = []
         for text_item in texts:
-            # This will make sequential async calls, not ideal for batching.
-            # We should batch the call to run_in_executor if possible.
-            embedding = await self._aget_text_embedding(text_item) # Reuses the single async logic
+            embedding = await self._aget_text_embedding(text_item)
             embeddings.append(embedding)
         return embeddings
 
-        # A slightly better approach for batching with run_in_executor:
-        # def batch_embed_sync(texts_to_embed: List[str]):
-        #     results = []
-        #     for t in texts_to_embed:
-        #         resp = genai.embed_content(
-        #             model=self.model_name,
-        #             content=t,
-        #             task_type=self.task_type,
-        #             title=self.title if self.task_type == "RETRIEVAL_DOCUMENT" else None,
-        #         )
-        #         results.append(resp["embedding"])
-        #     return results
-        # return await loop.run_in_executor(None, batch_embed_sync, texts)
+    def _get_query_embedding(self, query: str) -> Embedding:
+        """Get embedding for a query string. Uses RETRIEVAL_QUERY task type."""
+        # Note: The new API might handle task types differently
+        # For now, we'll use the same method but could add config later
+        result = self._client.models.embed_content(
+            model=self.model_name,
+            contents=query,
+        )
+        return result.embeddings[0].values
 
+    async def _aget_query_embedding(self, query: str) -> Embedding:
+        """Async version of getting embedding for a query string."""
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, 
+            lambda: self._client.models.embed_content(
+                model=self.model_name, 
+                contents=query
+            )
+        )
+        return result.embeddings[0].values
 
 if __name__ == '__main__':
     load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
@@ -152,12 +108,11 @@ if __name__ == '__main__':
         print("GOOGLE_API_KEY not found in .env file.")
     else:
         print("Testing Gemini Custom Embeddings...")
-        # Example model name for embeddings, check official docs for the latest/correct one
-        # e.g., "models/embedding-001"
+        # Using the new gemini-embedding model
         embed_model = GeminiCustomEmbedding(
-            model_name="models/embedding-001", 
+            model_name="gemini-embedding-exp-03-07", 
             api_key=google_api_key,
-            task_type="RETRIEVAL_DOCUMENT" # or "RETRIEVAL_QUERY" for queries
+            task_type="RETRIEVAL_DOCUMENT"
         )
 
         # Test single text embedding
