@@ -64,7 +64,7 @@ class DevAssistantAgent:
         self.agent = FunctionAgent(
             tools=tools,
             llm=custom_llm,
-            system_prompt="You are a helpful assistant that can search through documents and execute various tasks using tools. Make sure to send all required paramets for all tool calls.",
+            system_prompt="You are a helpful assistant with access to various tools including local knowledge search and external APIs. When you need information to complete a task, use the available tools to gather that information first, then proceed with the main task. You can chain multiple tool calls together in a single response. For example, if you need a username for a GitHub operation, get it first using GITHUB_get_me, then use that information for subsequent operations. Always provide all required parameters for tool calls.",
             verbose=True
         )
         logger.info(f"DevAssistantAgent initialized with {len(tools)} tools")
@@ -140,43 +140,46 @@ class DevAssistantAgent:
                         
                         logger.info(f"🔧 Creating proxy tool: {tool_name}")
                         
+                        # Get tool schema to understand expected parameters
+                        tool_schema = getattr(tool_info, 'inputSchema', None) or getattr(tool_info, 'parameters', {})
+                        logger.info(f"🔧 Tool {tool_name} schema: {tool_schema}")
+                        
                         # Create proxy tool function that calls the tool directly
-                        def create_proxy_tool_fn(tl_name, proxy_url):
+                        def create_proxy_tool_fn(tl_name, proxy_url, expected_schema):
                             def proxy_tool_fn(**kwargs) -> str:
                                 logger.info(f"🔧 EXECUTING TOOL: {tl_name} with args: {kwargs}")
                                 
-                                # Parse arguments - handle both direct parameters and JSON strings in kwargs
-                                parsed_args = {}
-                                if 'kwargs' in kwargs and isinstance(kwargs['kwargs'], str):
-                                    # Handle case where LLM passes JSON string in kwargs parameter
-                                    try:
-                                        parsed_args = json.loads(kwargs['kwargs'])
-                                        logger.info(f"🔧 Parsed JSON args: {parsed_args}")
-                                    except json.JSONDecodeError:
-                                        logger.warning(f"🔧 Failed to parse JSON from kwargs: {kwargs['kwargs']}")
-                                        parsed_args = {k: v for k, v in kwargs.items() if k != 'kwargs'}
+                                # Use kwargs directly as the arguments
+                                # Remove any 'kwargs' wrapper if it exists from the LLM
+                                if 'kwargs' in kwargs and len(kwargs) == 1:
+                                    # LLM might wrap all args in a 'kwargs' field, unwrap it
+                                    inner_kwargs = kwargs['kwargs']
+                                    if isinstance(inner_kwargs, dict):
+                                        parsed_args = inner_kwargs
+                                        logger.info(f"🔧 Unwrapped kwargs field: {parsed_args}")
+                                    elif isinstance(inner_kwargs, str):
+                                        try:
+                                            parsed_args = json.loads(inner_kwargs)
+                                            logger.info(f"🔧 Parsed JSON from kwargs field: {parsed_args}")
+                                        except json.JSONDecodeError:
+                                            logger.error(f"🔧 Failed to parse JSON from kwargs field: {inner_kwargs}")
+                                            parsed_args = {}
+                                    else:
+                                        parsed_args = {}
                                 else:
-                                    # Handle direct parameters
+                                    # Use arguments directly
                                     parsed_args = kwargs
+                                    logger.info(f"🔧 Using direct args: {parsed_args}")
                                 
                                 async def async_call():
                                     transport = SSETransport(url=proxy_url)
                                     async with Client(transport=transport) as client:
                                         try:
-                                            # Call the tool directly using the client's tool interface
-                                            # The proxy has already registered the tool with proper signatures
-                                            if hasattr(client, 'tools') and hasattr(client.tools, tl_name):
-                                                tool = getattr(client.tools, tl_name)
-                                                if parsed_args:
-                                                    result = await tool(**parsed_args)
-                                                else:
-                                                    result = await tool()
+                                            # Always use call_tool with arguments parameter
+                                            if parsed_args:
+                                                result = await client.call_tool(tl_name, arguments=parsed_args)
                                             else:
-                                                # Fallback to call_tool if the tool interface is not available
-                                                if parsed_args:
-                                                    result = await client.call_tool(tl_name, arguments=parsed_args)
-                                                else:
-                                                    result = await client.call_tool(tl_name)
+                                                result = await client.call_tool(tl_name)
                                             return result
                                         except Exception as e:
                                             logger.error(f"🔧 Error calling tool {tl_name}: {e}")
@@ -219,7 +222,7 @@ class DevAssistantAgent:
                         
                         # Create the tool with proper parameters handling
                         proxy_tool = FunctionTool.from_defaults(
-                            fn=create_proxy_tool_fn(tool_name, mcp_proxy_url),
+                            fn=create_proxy_tool_fn(tool_name, mcp_proxy_url, tool_schema),
                             name=tool_name,
                             description=tool_description,
                         )

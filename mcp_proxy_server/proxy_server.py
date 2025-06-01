@@ -150,112 +150,112 @@ async def list_managed_servers() -> List[ManagedServerInfo] | Dict[str, Any]:
         return create_error_dict("An unexpected error occurred while listing managed servers.")
 
 
-@proxy_mcp.tool()
-async def get_server_tools(server_name: str) -> ListDownstreamToolsResponse | Dict[str, Any]:
-    """
-    Retrieves the list of tools available on a specific downstream MCP server.
-    Args:
-        server_name: The name of the downstream MCP server (as defined in the config).
-    """
-    try:
-        manager = await get_mcp_conn_manager()
-        wrapper = manager.get_server_handler(server_name)
-        if not wrapper:
-            return create_error_dict(f"Server '{server_name}' not found.", status_code=404)
-        if not wrapper.config.enabled:
-             return create_error_dict(f"Server '{server_name}' is configured but disabled.", status_code=403) 
+# @proxy_mcp.tool()
+# async def get_server_tools(server_name: str) -> ListDownstreamToolsResponse | Dict[str, Any]:
+#     """
+#     Retrieves the list of tools available on a specific downstream MCP server.
+#     Args:
+#         server_name: The name of the downstream MCP server (as defined in the config).
+#     """
+#     try:
+#         manager = await get_mcp_conn_manager()
+#         wrapper = manager.get_server_handler(server_name)
+#         if not wrapper:
+#             return create_error_dict(f"Server '{server_name}' not found.", status_code=404)
+#         if not wrapper.config.enabled:
+#              return create_error_dict(f"Server '{server_name}' is configured but disabled.", status_code=403) 
 
-        if wrapper.status != "connected":
-            return create_error_dict(f"Server '{server_name}' is not connected. Current status: {wrapper.status}.", status_code=503)
+#         if wrapper.status != "connected":
+#             return create_error_dict(f"Server '{server_name}' is not connected. Current status: {wrapper.status}.", status_code=503)
 
-        # downstream_tools_raw from MCPClientWrapper.list_tools() should be List[fastmcp.protocol.Tool]
-        downstream_tools_raw = await wrapper.list_tools() 
+#         # downstream_tools_raw from MCPClientWrapper.list_tools() should be List[fastmcp.protocol.Tool]
+#         downstream_tools_raw = await wrapper.list_tools() 
 
-        if downstream_tools_raw is None: 
-             return create_error_dict(f"Failed to retrieve tools from '{server_name}', server returned no data.", status_code=502)
+#         if downstream_tools_raw is None: 
+#              return create_error_dict(f"Failed to retrieve tools from '{server_name}', server returned no data.", status_code=502)
         
-        processed_tools: List[DownstreamToolSchema] = []
-        if isinstance(downstream_tools_raw, list):
-            for tool_object in downstream_tools_raw: # tool_object is fastmcp.protocol.Tool
-                params_schema: List[ToolParameterSchema] = []
+#         processed_tools: List[DownstreamToolSchema] = []
+#         if isinstance(downstream_tools_raw, list):
+#             for tool_object in downstream_tools_raw: # tool_object is fastmcp.protocol.Tool
+#                 params_schema: List[ToolParameterSchema] = []
                 
-                # Access attributes directly from the Pydantic model (fastmcp.protocol.Tool)
-                # The 'parameters' attribute of a fastmcp.protocol.Tool object is a list of fastmcp.protocol.ToolParameter objects
-                tool_parameters = tool_object.parameters if hasattr(tool_object, 'parameters') and tool_object.parameters else []
+#                 # Access attributes directly from the Pydantic model (fastmcp.protocol.Tool)
+#                 # The 'parameters' attribute of a fastmcp.protocol.Tool object is a list of fastmcp.protocol.ToolParameter objects
+#                 tool_parameters = tool_object.parameters if hasattr(tool_object, 'parameters') and tool_object.parameters else []
 
-                if tool_parameters:
-                    for p_obj in tool_parameters: # p_obj is fastmcp.protocol.ToolParameter
-                        params_schema.append(
-                            ToolParameterSchema(
-                                name=p_obj.name if hasattr(p_obj, 'name') else None,
-                                type_hint=str(p_obj.type_hint) if hasattr(p_obj, 'type_hint') else 'Any',
-                                required=p_obj.required if hasattr(p_obj, 'required') else False,
-                                description=p_obj.description if hasattr(p_obj, 'description') else None,
-                                default=p_obj.default if hasattr(p_obj, 'default') else None # Handle if default is not present
-                            )
-                        )
+#                 if tool_parameters:
+#                     for p_obj in tool_parameters: # p_obj is fastmcp.protocol.ToolParameter
+#                         params_schema.append(
+#                             ToolParameterSchema(
+#                                 name=p_obj.name if hasattr(p_obj, 'name') else None,
+#                                 type_hint=str(p_obj.type_hint) if hasattr(p_obj, 'type_hint') else 'Any',
+#                                 required=p_obj.required if hasattr(p_obj, 'required') else False,
+#                                 description=p_obj.description if hasattr(p_obj, 'description') else None,
+#                                 default=p_obj.default if hasattr(p_obj, 'default') else None # Handle if default is not present
+#                             )
+#                         )
                 
-                tool_name = tool_object.name if hasattr(tool_object, 'name') else "Unknown Tool"
-                tool_description = tool_object.description if hasattr(tool_object, 'description') else "No description"
+#                 tool_name = tool_object.name if hasattr(tool_object, 'name') else "Unknown Tool"
+#                 tool_description = tool_object.description if hasattr(tool_object, 'description') else "No description"
 
-                processed_tools.append(
-                    DownstreamToolSchema(
-                        name=tool_name,
-                        description=tool_description,
-                        parameters=params_schema
-                    )
-                )
-        else:
-            logger.warning(f"Received unexpected tool list format from {server_name}: {type(downstream_tools_raw)}. Expected a list.")
-            return create_error_dict(f"Received unexpected tool list format from '{server_name}'. Expected a list.", status_code=502)
+#                 processed_tools.append(
+#                     DownstreamToolSchema(
+#                         name=tool_name,
+#                         description=tool_description,
+#                         parameters=params_schema
+#                     )
+#                 )
+#         else:
+#             logger.warning(f"Received unexpected tool list format from {server_name}: {type(downstream_tools_raw)}. Expected a list.")
+#             return create_error_dict(f"Received unexpected tool list format from '{server_name}'. Expected a list.", status_code=502)
 
-        return ListDownstreamToolsResponse(tools=processed_tools)
+#         return ListDownstreamToolsResponse(tools=processed_tools)
 
-    except RuntimeError as e: 
-        return create_error_dict(str(e))
-    except Exception as e:
-        logger.error(f"Unexpected error in get_server_tools for '{server_name}': {e}", exc_info=True)
-        return create_error_dict(f"An unexpected error occurred while getting tools for '{server_name}'.")
+#     except RuntimeError as e: 
+#         return create_error_dict(str(e))
+#     except Exception as e:
+#         logger.error(f"Unexpected error in get_server_tools for '{server_name}': {e}", exc_info=True)
+#         return create_error_dict(f"An unexpected error occurred while getting tools for '{server_name}'.")
 
 
-@proxy_mcp.tool()
-async def call_server_tool(
-    server_name: str,
-    tool_name: str,
-    arguments: Dict[str, Any]
-) -> ToolCallResult | Dict[str, Any]:
-    """
-    Calls a specific tool on a downstream MCP server.
-    Args:
-        server_name: The name of the downstream MCP server.
-        tool_name: The name of the tool to call on the downstream server.
-        arguments: A dictionary of arguments to pass to the downstream tool.
-    """
-    try:
-        manager = await get_mcp_conn_manager()
-        wrapper = manager.get_server_handler(server_name)
+# @proxy_mcp.tool()
+# async def call_server_tool(
+#     server_name: str,
+#     tool_name: str,
+#     arguments: Dict[str, Any]
+# ) -> ToolCallResult | Dict[str, Any]:
+#     """
+#     Calls a specific tool on a downstream MCP server.
+#     Args:
+#         server_name: The name of the downstream MCP server.
+#         tool_name: The name of the tool to call on the downstream server.
+#         arguments: A dictionary of arguments to pass to the downstream tool.
+#     """
+#     try:
+#         manager = await get_mcp_conn_manager()
+#         wrapper = manager.get_server_handler(server_name)
 
-        if not wrapper:
-            return create_error_dict(f"Server '{server_name}' not found.", status_code=404)
-        if not wrapper.config.enabled:
-            return create_error_dict(f"Server '{server_name}' is configured but disabled.", status_code=403)
+#         if not wrapper:
+#             return create_error_dict(f"Server '{server_name}' not found.", status_code=404)
+#         if not wrapper.config.enabled:
+#             return create_error_dict(f"Server '{server_name}' is configured but disabled.", status_code=403)
 
-        if not await wrapper.ensure_connected():
-             return create_error_dict(f"Failed to connect to server '{server_name}'. Current status: {wrapper.status}.", status_code=503)
+#         if not await wrapper.ensure_connected():
+#              return create_error_dict(f"Failed to connect to server '{server_name}'. Current status: {wrapper.status}.", status_code=503)
 
-        logger.info(f"Proxying call to '{tool_name}' on server '{server_name}' with args: {arguments}")
-        result = await wrapper.call_tool(tool_name=tool_name, params=arguments)
-        print(result)
-        if wrapper.status == "error" and result is None: 
-            return ToolCallResult(success=False, error_message=f"Execution of '{tool_name}' on '{server_name}' failed. Server status: error.")
+#         logger.info(f"Proxying call to '{tool_name}' on server '{server_name}' with args: {arguments}")
+#         result = await wrapper.call_tool(tool_name=tool_name, params=arguments)
+#         print(result)
+#         if wrapper.status == "error" and result is None: 
+#             return ToolCallResult(success=False, error_message=f"Execution of '{tool_name}' on '{server_name}' failed. Server status: error.")
         
-        return ToolCallResult(success=True, result=result)
+#         return ToolCallResult(success=True, result=result)
 
-    except RuntimeError as e: 
-        return create_error_dict(str(e))
-    except Exception as e:
-        logger.error(f"Unexpected error in call_server_tool for '{server_name}/{tool_name}': {e}", exc_info=True)
-        return create_error_dict(f"An unexpected error occurred while calling tool '{tool_name}' on '{server_name}'.")
+#     except RuntimeError as e: 
+#         return create_error_dict(str(e))
+#     except Exception as e:
+#         logger.error(f"Unexpected error in call_server_tool for '{server_name}/{tool_name}': {e}", exc_info=True)
+#         return create_error_dict(f"An unexpected error occurred while calling tool '{tool_name}' on '{server_name}'.")
 
 
 # --- Main Execution Block ---
