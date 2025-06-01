@@ -26,12 +26,12 @@ async def main():
     google_api_key = os.getenv("GOOGLE_API_KEY")
     mcp_proxy_url = os.getenv("MCP_PROXY_URL")
     
-    # Ensure MCP proxy URL is in the correct format for the proxy endpoint
-    if mcp_proxy_url and not mcp_proxy_url.endswith('/proxy'):
+    # Ensure MCP proxy URL is in the correct format for the SSE endpoint
+    if mcp_proxy_url and not mcp_proxy_url.endswith('/sse'):
         if mcp_proxy_url.endswith('/'):
-            mcp_proxy_url = mcp_proxy_url + 'proxy'
+            mcp_proxy_url = mcp_proxy_url + 'sse'
         else:
-            mcp_proxy_url = mcp_proxy_url + '/proxy'
+            mcp_proxy_url = mcp_proxy_url + '/sse'
     
     # KNOWLEDGE_BASE_PATH from .env is relative to the project root (where .env is)
     knowledge_base_env_path = os.getenv("KNOWLEDGE_BASE_PATH", "./mock_knowledge_base")

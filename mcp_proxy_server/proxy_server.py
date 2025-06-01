@@ -27,6 +27,7 @@ try:
         ListDownstreamToolsResponse,
         ErrorResponse
     )
+    from mcp_proxy_server.get_methods import register_downstream_tools_on_proxy
 except ImportError as e:
     print(f"Error importing modules. Ensure mcp_manager is in PYTHONPATH or installed. Details: {e}")
     sys.exit(1)
@@ -61,6 +62,11 @@ async def app_lifespan(fast_mcp_server: FastMCP): # server instance is passed by
         
         # Set the global config list after successful loading and manager init
         proxy_mcp_config = loaded_server_configs
+        
+        # Register downstream tools on the proxy instance
+        logger.info("Registering downstream tools on proxy instance...")
+        await register_downstream_tools_on_proxy(fast_mcp_server, mcp_conn_manager_instance)
+        logger.info("Downstream tools registration completed.")
         
     except Exception as e:
         logger.error(f"Error during startup via lifespan: {e}", exc_info=True)
@@ -271,7 +277,7 @@ if __name__ == "__main__":
     # This will use the lifespan manager correctly.
     try:
         proxy_mcp.run(
-            transport="streamable-http", # Default transport for uvicorn
+            transport="sse", # Default transport for uvicorn
             host="0.0.0.0",
             port=8001,
             log_level="info" # uvicorn log level

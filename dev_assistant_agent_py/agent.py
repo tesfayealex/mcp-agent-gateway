@@ -8,7 +8,7 @@ from llama_index.core.base.llms.types import ChatMessage, MessageRole
 
 # Add fastmcp imports like in test_proxy_server.py
 from fastmcp.client import Client
-from fastmcp.client.transports import StreamableHttpTransport
+from fastmcp.client.transports import SSETransport
 
 # from .custom_llm import GeminiCustomLLM # Package import
 from custom_llm import GeminiCustomLLM # Direct import for dev/testing
@@ -49,7 +49,7 @@ class DevAssistantAgent:
         rag_query_engine: BaseQueryEngine,
         custom_llm: GeminiCustomLLM,
         tools: List[BaseTool], # Tools will now be passed in
-        system_prompt: Optional[str] = "You are a helpful development assistant with access to GitHub tools and a local knowledge base. When users ask about repositories, commits, files, or other GitHub operations, use the appropriate GitHub tools (LOCAL_GITHUB_MCP_*). When they ask for general development information, use the LocalKnowledgeBaseSearch tool. Always be specific about what repository/owner information you need for GitHub operations. Maintain context from previous messages in the conversation.",
+        system_prompt: Optional[str] = "You are a helpful development assistant with access to MCP tools and a local knowledge base. Use MCP tools for GitHub operations, filesystem access, and other development tasks. Use the LocalKnowledgeBaseSearch tool for general development information. Always be specific about what information you need for operations. Maintain context from previous messages in the conversation.",
         custom_query_embedder: Optional[GeminiCustomEmbedding] = None,
         mcp_client: Optional[Client] = None,
     ):
@@ -59,24 +59,15 @@ class DevAssistantAgent:
         self.custom_query_embedder = custom_query_embedder
         self._mcp_client = mcp_client
         self._conversation_history = []
-
-        logger.info(f"Initializing DevAssistantAgent with LLM: {custom_llm.model_name}")
-        logger.info(f"MCP Proxy URL: {mcp_proxy_url}")
-
-        Settings.llm = self.custom_llm
         
-        self.agent = FunctionAgent(
+        # Create the agent with the provided tools and system prompt
+        self.agent = FunctionAgent.from_tools(
             tools=tools,
-            llm=self.custom_llm,
+            llm=custom_llm,
             system_prompt=system_prompt,
             verbose=True
         )
-        logger.info(f"DevAssistantAgent initialized with {len(tools)} tools.")
-        
-        # Log available tools for debugging
-        logger.info("Available tools:")
-        for tool in tools:
-            logger.info(f"  - {tool.metadata.name}: {tool.metadata.description}")
+        logger.info(f"DevAssistantAgent initialized with {len(tools)} tools")
 
     @classmethod
     async def create(
@@ -84,320 +75,138 @@ class DevAssistantAgent:
         mcp_proxy_url: str,
         rag_query_engine: BaseQueryEngine,
         custom_llm: GeminiCustomLLM,
-        system_prompt: Optional[str] = "You are a helpful development assistant with access to GitHub tools and a local knowledge base. When users ask about repositories, commits, files, or other GitHub operations, use the appropriate GitHub tools (LOCAL_GITHUB_MCP_*). When they ask for general development information, use the LocalKnowledgeBaseSearch tool. Always be specific about what repository/owner information you need for GitHub operations. Maintain context from previous messages in the conversation.",
+        system_prompt: Optional[str] = "You are a helpful development assistant with access to MCP tools and a local knowledge base. Use MCP tools for GitHub operations, filesystem access, and other development tasks. Use the LocalKnowledgeBaseSearch tool for general development information. Always be specific about what information you need for operations. Maintain context from previous messages in the conversation.",
         custom_query_embedder: Optional[GeminiCustomEmbedding] = None,
     ) -> "DevAssistantAgent":
         """
-        Asynchronously creates and initializes the DevAssistantAgent, including fetching MCP tools.
+        Create a DevAssistantAgent instance with tools discovered from the MCP proxy.
+        Uses SSE transport and standard MCP calls.
         """
-        # Create MCP proxy client like in test_proxy_server.py
-        transport = StreamableHttpTransport(url=mcp_proxy_url)
+        logger.info(f"Creating DevAssistantAgent with MCP proxy at: {mcp_proxy_url}")
+        
+        # Setup tools asynchronously using SSE transport
+        tools = await cls._setup_tools_async(mcp_proxy_url, rag_query_engine)
+        
+        # Create MCP proxy client using SSE transport
+        transport = SSETransport(url=mcp_proxy_url)
         mcp_client = Client(transport=transport)
-
-        try:
-            # Initialize and connect the client
-            logger.info("Connecting to MCP client...")
-            await mcp_client.__aenter__()  # Manually enter the context manager
-            logger.info("MCP client connected successfully")
-
-            # <<<< TEMP TEST CALL >>>>
-            try:
-                logger.info("[CREATE_AGENT_TEST] Attempting test call to list_managed_servers within create()...")
-                test_servers_result = await mcp_client.call_tool("list_managed_servers")
-                logger.info(f"[CREATE_AGENT_TEST] Test call list_managed_servers result: {test_servers_result}")
-            except Exception as e_test_call:
-                logger.error(f"[CREATE_AGENT_TEST] Test call to list_managed_servers FAILED: {e_test_call}", exc_info=True)
-                # Optionally, re-raise or handle if this is critical for agent creation
-            # <<<< END TEMP TEST CALL >>>>
-            
-            tools = await cls._setup_tools_async(mcp_proxy_url, rag_query_engine)
-            
-            agent_instance = cls(
-                mcp_proxy_url=mcp_proxy_url,
-                rag_query_engine=rag_query_engine,
-                custom_llm=custom_llm,
-                tools=tools,
-                system_prompt=system_prompt,
-                custom_query_embedder=custom_query_embedder,
-                mcp_client=mcp_client
-            )
-            
-            return agent_instance
-        except Exception as e:
-            logger.error(f"Failed to create DevAssistantAgent: {e}", exc_info=True)
-            # Clean up client on failure
-            if mcp_client:
-                try:
-                    await mcp_client.__aexit__(None, None, None)
-                except:
-                    pass
-            raise # Re-raise the exception to indicate failure
+        
+        return cls(
+            mcp_proxy_url=mcp_proxy_url,
+            rag_query_engine=rag_query_engine,
+            custom_llm=custom_llm,
+            tools=tools,
+            system_prompt=system_prompt,
+            custom_query_embedder=custom_query_embedder,
+            mcp_client=mcp_client
+        )
 
     @staticmethod # Make it static as it's called from create before instance exists
     async def _setup_tools_async(
         mcp_proxy_url: str, 
         rag_query_engine: BaseQueryEngine,
-        # mcp_client: Client # No longer pass the main client here for tool execution
     ) -> List[BaseTool]:
-        """Asynchronously sets up the tools for the agent using the MCP proxy."""
-        all_tools: List[BaseTool] = []
-
-        # 1. MCP Proxy Tools (using fastmcp client like test_proxy_server.py)
-        # We need a temporary client here just to discover servers and tools.
-        # Tool execution will create its own client.
-        temp_transport = StreamableHttpTransport(url=mcp_proxy_url)
-        temp_mcp_client = Client(transport=temp_transport)
-
+        """
+        Discover and create all available tools from the MCP proxy and RAG engine.
+        Uses standard MCP calls without server_name references.
+        """
+        all_tools = []
+        
+        # 1. Add the local RAG query engine tool first
+        local_knowledge_tool = QueryEngineTool.from_defaults(
+            query_engine=rag_query_engine,
+            name="LocalKnowledgeBaseSearch",
+            description="Search the local knowledge base for development-related information, documentation, and best practices. Use this when users ask general development questions."
+        )
+        all_tools.append(local_knowledge_tool)
+        
+        # 2. MCP proxy tools - simplified approach using SSE transport
         try:
-            async with temp_mcp_client: # Ensure temp client is properly managed
-                logger.info(f"Using temporary MCP client to discover managed servers at {mcp_proxy_url}...")
-                managed_servers_result = await temp_mcp_client.call_tool("list_managed_servers")
+            logger.info(f"🔧 Discovering MCP proxy tools from {mcp_proxy_url}")
+            
+            # Create temporary client to discover tools
+            temp_transport = SSETransport(url=mcp_proxy_url)
+            temp_mcp_client = Client(transport=temp_transport)
+            
+            async with temp_mcp_client:
+                # Get all available tools from the proxy
+                proxy_tools = await temp_mcp_client.list_tools()
+                logger.info(f"🔧 Found {len(proxy_tools)} tools from proxy")
                 
-                managed_servers = []
-                if isinstance(managed_servers_result, list) and len(managed_servers_result) > 0:
-                    # Handle TextContent response like in test file
-                    from mcp.types import TextContent
-                    if isinstance(managed_servers_result[0], TextContent):
-                        try:
-                            json_text = managed_servers_result[0].text
-                            parsed_servers = json.loads(json_text)
-                            if isinstance(parsed_servers, list):
-                                managed_servers = parsed_servers
-                                logger.info(f"Found {len(managed_servers)} managed servers")
-                        except json.JSONDecodeError as e:
-                            logger.error(f"Failed to parse servers JSON: {e}")
-                    elif all(isinstance(item, dict) for item in managed_servers_result):
-                        managed_servers = managed_servers_result
+                for tool_info in proxy_tools:
+                    if hasattr(tool_info, 'name') and hasattr(tool_info, 'description'):
+                        tool_name = tool_info.name
+                        tool_description = tool_info.description
+                        
+                        logger.info(f"🔧 Creating proxy tool: {tool_name}")
+                        
+                        # Create proxy tool function that calls MCP directly
+                        def create_proxy_tool_fn(tl_name, proxy_url):
+                            def proxy_tool_fn(**kwargs) -> str:
+                                logger.info(f"🔧 EXECUTING TOOL: {tl_name} with args: {kwargs}")
+                                
+                                async def async_call():
+                                    transport = SSETransport(url=proxy_url)
+                                    async with Client(transport=transport) as client:
+                                        try:
+                                            if kwargs:
+                                                result = await client.call_tool(tl_name, kwargs)
+                                            else:
+                                                result = await client.call_tool(tl_name)
+                                            return result
+                                        except Exception as e:
+                                            logger.error(f"🔧 Error calling tool {tl_name}: {e}")
+                                            return {"error": str(e)}
 
-                # For each connected server, create proxy tools
-                for server_info in managed_servers:
-                    if not isinstance(server_info, dict):
-                        continue
+                                def run_in_thread():
+                                    new_loop = asyncio.new_event_loop()
+                                    asyncio.set_event_loop(new_loop)
+                                    try:
+                                        result = new_loop.run_until_complete(async_call())
+                                        return result
+                                    finally:
+                                        new_loop.close()
+                                
+                                try:
+                                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                                        future = executor.submit(run_in_thread)
+                                        result = future.result(timeout=60)
+                                except concurrent.futures.TimeoutError:
+                                    logger.error(f"🔧 Timeout (60s) waiting for {tl_name} to complete")
+                                    return f"Error: Tool {tl_name} timed out"
+                                except Exception as e:
+                                    logger.error(f"🔧 Error in thread execution for {tl_name}: {e}")
+                                    return f"Error executing {tl_name}: {e}"
+                                
+                                logger.info(f"🔧 TOOL {tl_name} RESULT: {result}")
+                                
+                                # Process result
+                                if isinstance(result, dict):
+                                    if result.get("error"):
+                                        return f"Error: {result['error']}"
+                                    elif result.get("result"):
+                                        return str(result["result"])
+                                    else:
+                                        return str(result)
+                                else:
+                                    return str(result)
+                            
+                            return proxy_tool_fn
                         
-                    server_name = server_info.get("name")
-                    if server_info.get("status") == "connected" and server_info.get("config_enabled"):
-                        logger.info(f"Creating proxy tools for server: {server_name}")
-                        
-                        # Get server tools
-                        server_tools_result = await temp_mcp_client.call_tool(
-                            "get_server_tools",
-                            arguments={"server_name": server_name}
+                        # Create the tool with proper parameters handling
+                        proxy_tool = FunctionTool.from_defaults(
+                            fn=create_proxy_tool_fn(tool_name, mcp_proxy_url),
+                            name=tool_name,
+                            description=tool_description,
                         )
                         
-                        server_tools_data = None
-                        if isinstance(server_tools_result, list) and len(server_tools_result) > 0:
-                            from mcp.types import TextContent
-                            if isinstance(server_tools_result[0], TextContent):
-                                try:
-                                    json_text = server_tools_result[0].text
-                                    server_tools_data = json.loads(json_text)
-                                except json.JSONDecodeError:
-                                    pass
-                        elif isinstance(server_tools_result, dict):
-                            server_tools_data = server_tools_result
-
-                        if server_tools_data and "tools" in server_tools_data:
-                            tools_list = server_tools_data.get("tools", [])
-                            logger.info(f"Server {server_name} has {len(tools_list)} tools")
-                            
-                            # Create FunctionTool for each server tool
-                            for tool_info in tools_list:
-                                tool_name = tool_info.get("name")
-                                tool_description = tool_info.get("description", f"Tool {tool_name} from {server_name}")
-                                tool_input_schema = tool_info.get("inputSchema", {})
-                                
-                                logger.info(f"Creating tool {tool_name} with schema: {tool_input_schema}")
-                                
-                                # Create a closure to capture server_name and tool_name
-                                # It now also captures mcp_proxy_url to create a client per call
-                                def create_proxy_tool_fn(proxy_url_for_call, srv_name, tl_name, schema):
-                                    properties = schema.get("properties", {})
-                                    
-                                    if not properties:
-                                        def proxy_tool_fn() -> str:
-                                            logger.info(f"🔧 EXECUTING TOOL (no-params): {tl_name} on server {srv_name}")
-                                            
-                                            async def async_call_isolated():
-                                                logger.info(f"🔧 [ASYNC_CALL_ISO ENTRY] For {tl_name} in thread {threading.get_ident()}. Proxy URL: {proxy_url_for_call}")
-                                                # Create new transport and client inside the async function in the new thread
-                                                transport = StreamableHttpTransport(url=proxy_url_for_call)
-                                                isolated_mcp_client = Client(transport=transport)
-                                                async with isolated_mcp_client: # Manage client lifecycle here
-                                                    logger.info(f"🔧 [ASYNC_CALL_ISO PRE-AWAIT] Isolated MCP Client: {isolated_mcp_client}")
-                                                    try:
-                                                        result = await isolated_mcp_client.call_tool(
-                                                            "call_server_tool",
-                                                            arguments={
-                                                                "server_name": srv_name,
-                                                                "tool_name": tl_name,
-                                                                "arguments": {}
-                                                            }
-                                                        )
-                                                    except Exception as e_call:
-                                                        logger.error(f"🔧 [ASYNC_CALL_ISO AWAIT ERROR] MCP call for {tl_name} failed: {e_call}", exc_info=True)
-                                                        raise
-                                                    logger.info(f"🔧 [ASYNC_CALL_ISO POST-AWAIT] MCP call completed for {tl_name}. Result: {type(result)}")
-                                                    return result
-
-                                            def run_async_in_thread_isolated():
-                                                logger.info(f"🔧 [RUN_ASYNC_IN_THREAD_ISO ENTRY] For {tl_name}. Thread: {threading.get_ident()}")
-                                                new_loop = None
-                                                try:
-                                                    logger.info(f"🔧 [RUN_ASYNC_IN_THREAD_ISO PRE-NEW-LOOP] For {tl_name}")
-                                                    new_loop = asyncio.new_event_loop()
-                                                    logger.info(f"🔧 [RUN_ASYNC_IN_THREAD_ISO POST-NEW-LOOP] For {tl_name}. Loop: {new_loop}")
-                                                    asyncio.set_event_loop(new_loop)
-                                                    logger.info(f"🔧 [RUN_ASYNC_IN_THREAD_ISO POST-SET-LOOP] For {tl_name}")
-                                                    logger.info(f"🔧 [RUN_ASYNC_IN_THREAD_ISO PRE-RUN-UNTIL-COMPLETE] For {tl_name}")
-                                                    result = new_loop.run_until_complete(async_call_isolated())
-                                                    logger.info(f"🔧 [RUN_ASYNC_IN_THREAD_ISO POST-RUN-UNTIL-COMPLETE] For {tl_name}. Result type: {type(result)}")
-                                                    return result
-                                                except Exception as e_thread_run:
-                                                    logger.error(f"🔧 [RUN_ASYNC_IN_THREAD_ISO ERROR] For {tl_name}: {e_thread_run}", exc_info=True)
-                                                    raise # Re-raise to be caught by the main try/except
-                                                finally:
-                                                    if new_loop:
-                                                        logger.info(f"🔧 [RUN_ASYNC_IN_THREAD_ISO PRE-CLOSE-LOOP] For {tl_name}")
-                                                        new_loop.close()
-                                                        logger.info(f"🔧 [RUN_ASYNC_IN_THREAD_ISO POST-CLOSE-LOOP] For {tl_name}")
-                                            
-                                            try:
-                                                logger.info(f"🔧 [PROXY_TOOL_FN PRE-EXECUTOR] For {tl_name}. Preparing to submit run_async_in_thread_isolated.")
-                                                with concurrent.futures.ThreadPoolExecutor() as executor:
-                                                    logger.info(f"🔧 [PROXY_TOOL_FN IN-EXECUTOR] For {tl_name}. Submitting to executor.")
-                                                    future = executor.submit(run_async_in_thread_isolated)
-                                                    logger.info(f"🔧 [PROXY_TOOL_FN POST-SUBMIT] For {tl_name}. Future: {future}. Waiting for result...")
-                                                    result = future.result(timeout=60) # Increased timeout slightly
-                                                    logger.info(f"🔧 [PROXY_TOOL_FN POST-RESULT] For {tl_name}. Result type: {type(result)}")
-                                            except concurrent.futures.TimeoutError:
-                                                logger.error(f"🔧 Timeout (60s) waiting for isolated {tl_name} to complete")
-                                                return f"Error: Tool {tl_name} timed out"
-                                            except Exception as e:
-                                                logger.error(f"🔧 Error in isolated async thread for {tl_name}: {e}", exc_info=True)
-                                                return f"Error executing {tl_name} in thread: {e}"
-                                            # Process the result (same as before)
-                                            logger.info(f"🔧 TOOL {tl_name} RAW RESULT (isolated): {result}")
-                                            if isinstance(result, list) and len(result) > 0:
-                                                from mcp.types import TextContent
-                                                if isinstance(result[0], TextContent):
-                                                    try:
-                                                        result_data = json.loads(result[0].text)
-                                                        if result_data.get("success"): return str(result_data.get("result", ""))
-                                                        else: return f"Error: {result_data.get('error_message', 'Unknown error')}"
-                                                    except json.JSONDecodeError: return str(result[0].text)
-                                                else: return str(result[0])
-                                            elif isinstance(result, dict):
-                                                if result.get("success"): return str(result.get("result", ""))
-                                                else: return f"Error: {result.get('error_message', 'Unknown error')}"
-                                            return str(result)
-                                        return proxy_tool_fn
-                                    else: # Tool with parameters
-                                        def proxy_tool_fn(**kwargs) -> str:
-                                            logger.info(f"🔧 EXECUTING TOOL (with-params): {tl_name} on server {srv_name} with {kwargs}")
-                                            actual_arguments = kwargs
-
-                                            async def async_call_isolated_params():
-                                                logger.info(f"🔧 [ASYNC_CALL_ISO_PARAMS ENTRY] For {tl_name} in thread {threading.get_ident()}. Proxy URL: {proxy_url_for_call}")
-                                                transport = StreamableHttpTransport(url=proxy_url_for_call)
-                                                isolated_mcp_client = Client(transport=transport)
-                                                async with isolated_mcp_client:
-                                                    logger.info(f"🔧 [ASYNC_CALL_ISO_PARAMS PRE-AWAIT] Isolated MCP Client: {isolated_mcp_client}")
-                                                    try:
-                                                        result = await isolated_mcp_client.call_tool(
-                                                            "call_server_tool",
-                                                            arguments={
-                                                                "server_name": srv_name,
-                                                                "tool_name": tl_name,
-                                                                "arguments": actual_arguments
-                                                            }
-                                                        )
-                                                    except Exception as e_call:
-                                                        logger.error(f"🔧 [ASYNC_CALL_ISO_PARAMS AWAIT ERROR] MCP call for {tl_name} failed: {e_call}", exc_info=True)
-                                                        raise
-                                                    logger.info(f"🔧 [ASYNC_CALL_ISO_PARAMS POST-AWAIT] MCP call completed for {tl_name}. Result: {type(result)}")
-                                                    return result
-
-                                            def run_async_in_thread_isolated_params():
-                                                logger.info(f"🔧 [RUN_ASYNC_IN_THREAD_ISO_PARAMS ENTRY] For {tl_name}. Thread: {threading.get_ident()}")
-                                                new_loop = None
-                                                try:
-                                                    logger.info(f"🔧 [RUN_ASYNC_IN_THREAD_ISO_PARAMS PRE-NEW-LOOP] For {tl_name}")
-                                                    new_loop = asyncio.new_event_loop()
-                                                    logger.info(f"🔧 [RUN_ASYNC_IN_THREAD_ISO_PARAMS POST-NEW-LOOP] For {tl_name}. Loop: {new_loop}")
-                                                    asyncio.set_event_loop(new_loop)
-                                                    logger.info(f"🔧 [RUN_ASYNC_IN_THREAD_ISO_PARAMS POST-SET-LOOP] For {tl_name}")
-                                                    logger.info(f"🔧 [RUN_ASYNC_IN_THREAD_ISO_PARAMS PRE-RUN-UNTIL-COMPLETE] For {tl_name}")
-                                                    result = new_loop.run_until_complete(async_call_isolated_params())
-                                                    logger.info(f"🔧 [RUN_ASYNC_IN_THREAD_ISO_PARAMS POST-RUN-UNTIL-COMPLETE] For {tl_name}. Result type: {type(result)}")
-                                                    return result
-                                                except Exception as e_thread_run:
-                                                    logger.error(f"🔧 [RUN_ASYNC_IN_THREAD_ISO_PARAMS ERROR] For {tl_name}: {e_thread_run}", exc_info=True)
-                                                    raise # Re-raise to be caught by the main try/except
-                                                finally:
-                                                    if new_loop:
-                                                        logger.info(f"🔧 [RUN_ASYNC_IN_THREAD_ISO_PARAMS PRE-CLOSE-LOOP] For {tl_name}")
-                                                        new_loop.close()
-                                                        logger.info(f"🔧 [RUN_ASYNC_IN_TFsHREAD_ISO_PARAMS POST-CLOSE-LOOP] For {tl_name}")
-
-                                            try:
-                                                logger.info(f"🔧 [PROXY_TOOL_FN_PARAMS PRE-EXECUTOR] For {tl_name}. Preparing to submit run_async_in_thread_isolated_params.")
-                                                with concurrent.futures.ThreadPoolExecutor() as executor:
-                                                    logger.info(f"🔧 [PROXY_TOOL_FN_PARAMS IN-EXECUTOR] For {tl_name}. Submitting to executor.")
-                                                    future = executor.submit(run_async_in_thread_isolated_params)
-                                                    logger.info(f"🔧 [PROXY_TOOL_FN_PARAMS POST-SUBMIT] For {tl_name}. Future: {future}. Waiting for result...")
-                                                    result = future.result(timeout=60) # Increased timeout
-                                                    logger.info(f"🔧 [PROXY_TOOL_FN_PARAMS POST-RESULT] For {tl_name}. Result type: {type(result)}")
-                                            except concurrent.futures.TimeoutError:
-                                                logger.error(f"🔧 Timeout (60s) waiting for isolated {tl_name} (params) to complete")
-                                                return f"Error: Tool {tl_name} (params) timed out"
-                                            except Exception as e:
-                                                logger.error(f"🔧 Error in isolated async thread for {tl_name} (params): {e}", exc_info=True)
-                                                return f"Error executing {tl_name} (params) in thread: {e}"
-                                            
-                                            # Process the result (same as before)
-                                            logger.info(f"🔧 TOOL {tl_name} RAW RESULT (isolated, params): {result}")
-                                            if isinstance(result, list) and len(result) > 0:
-                                                from mcp.types import TextContent
-                                                if isinstance(result[0], TextContent):
-                                                    try:
-                                                        result_data = json.loads(result[0].text)
-                                                        if result_data.get("success"): return str(result_data.get("result", ""))
-                                                        else: return f"Error: {result_data.get('error_message', 'Unknown error')}"
-                                                    except json.JSONDecodeError: return str(result[0].text)
-                                                else: return str(result[0])
-                                            elif isinstance(result, dict):
-                                                if result.get("success"): return str(result.get("result", ""))
-                                                else: return f"Error: {result.get('error_message', 'Unknown error')}"
-                                            return str(result)
-                                        return proxy_tool_fn
-                                
-                                # Sanitize server name for valid function names
-                                sanitized_server_name = server_name.replace(" ", "_").replace("-", "_")
-                                
-                                # Create the function tool
-                                proxy_tool = FunctionTool.from_defaults(
-                                    fn=create_proxy_tool_fn(mcp_proxy_url, server_name, tool_name, tool_input_schema), # Pass mcp_proxy_url
-                                    name=f"{sanitized_server_name}_{tool_name}",
-                                    description=f"[{server_name}] {tool_description}"
-                                )
-                                all_tools.append(proxy_tool)
-                                logger.info(f"Added proxy tool: {sanitized_server_name}_{tool_name}")
-
+                        all_tools.append(proxy_tool)
+                        
         except Exception as e:
-            logger.error(f"Failed to discover MCP proxy tools: {e}", exc_info=True)
+            logger.error(f"🚨 Error setting up MCP proxy tools: {e}")
+            # Continue with just local tools if proxy fails
         
-        # 2. RAG Tool (remains the same)
-        try:
-            rag_tool = QueryEngineTool.from_defaults(
-                query_engine=rag_query_engine,
-                name="LocalKnowledgeBaseSearch",
-                description="Search and query the local knowledge base for development-related information, documentation, and code examples. Use this when you need to find specific information from the knowledge base."
-            )
-            all_tools.append(rag_tool)
-            logger.info("Added RAG tool (LocalKnowledgeBaseSearch).")
-        except Exception as e:
-            logger.error(f"Failed to create RAG tool: {e}", exc_info=True)
-
+        logger.info(f"🔧 Total tools created: {len(all_tools)}")
         return all_tools
 
     async def close(self):

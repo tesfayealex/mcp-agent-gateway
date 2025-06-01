@@ -1,6 +1,6 @@
 [
   {
-    "name": "LOCAL GITHUB MCP",
+    "name": "GITHUB",
     "enabled": true,
     "connection_type": "stdio",
     "stdio_config": {
@@ -43,19 +43,25 @@
     "reconnect_delay_seconds": 5
   },
   {
-    "name": "Disabled Test MCP",
-    "enabled": false,
+    "name": "filesystem",
+    "enabled": true,
     "connection_type": "stdio",
     "stdio_config": {
-      "command": "echo",
-      "args": ["Hello from disabled MCP"],
-      "env_vars_to_pass": {}
+      "command": "docker",
+      "args": [
+                "run",
+                "-i",
+                "--rm",
+                "--mount", "type=bind,src=/Users/apple/Downloads,dst=/projects/Downloads",
+                "mcp/filesystem",
+                "/projects"
+              ]
     },
     "url_config": null,
     "authentication": null,
     "test_tool": {
-        "name": "some_echo_tool",
-        "params": {"message": "test"}
+        "name": "list_files",
+        "params": {}
     },
     "max_reconnect_attempts": 1,
     "reconnect_delay_seconds": 5

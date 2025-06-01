@@ -17,6 +17,8 @@ pydantic
 pydantic-settings==2.9.1
 pydantic_core==2.33.2
 Pygments==2.19.1
+pytest
+pytest-asyncio
 python-dotenv
 python-multipart==0.0.20
 rich==14.0.0

@@ -89,13 +89,12 @@ class MCPClientWrapper:
                 auth_headers = await self._get_auth_headers()
                 logger.debug(f"Server '{self.config.name}': Initializing FastMCPClient for URL: {self.config.url_config.base_url}")
                 
-                # Manage aiohttp.ClientSession explicitly if providing it to FastMCPClient
+                # Let FastMCP handle its own session management to avoid cancel scope conflicts
                 if auth_headers:
-                    self._http_client_session = aiohttp.ClientSession(headers=auth_headers)
-                    self._http_client = FastMCPClient(base_url=self.config.url_config.base_url, session=self._http_client_session)
+                    # Create client with auth headers, let it manage its own session
+                    self._http_client = FastMCPClient(base_url=self.config.url_config.base_url, headers=auth_headers)
                 else:
-                    # If no auth headers, FastMCPClient will create its own session or use a default one.
-                    # We don't need to manage self._http_client_session in this case.
+                    # No auth headers, simple client creation
                     self._http_client = FastMCPClient(base_url=self.config.url_config.base_url)
                 
                 await self._http_client.__aenter__() # Enter context for the client itself
@@ -123,16 +122,18 @@ class MCPClientWrapper:
                 logger.debug(f"Server '{self.config.name}': Closing FastMCPClient (HTTP)...")
                 await self._http_client.__aexit__(None, None, None) # Exit context for the client
             except Exception as e:
-                logger.error(f"Server '{self.config.name}': Error exiting http client: {e}", exc_info=True)
+                logger.debug(f"Server '{self.config.name}': Error exiting http client (this may be expected): {e}")
             self._http_client = None
 
-        if self._http_client_session and not self._http_client_session.closed: # Our own aiohttp session
-            try:
-                logger.debug(f"Server '{self.config.name}': Closing aiohttp.ClientSession...")
-                await self._http_client_session.close()
-            except Exception as e:
-                logger.error(f"Server '{self.config.name}': Error closing aiohttp session: {e}", exc_info=True)
-            self._http_client_session = None
+        # Don't manually close the session if FastMCP is managing it
+        # if self._http_client_session and not self._http_client_session.closed: # Our own aiohttp session
+        #     try:
+        #         logger.debug(f"Server '{self.config.name}': Closing aiohttp.ClientSession...")
+        #         await self._http_client_session.close()
+        #     except Exception as e:
+        #         logger.error(f"Server '{self.config.name}': Error closing aiohttp session: {e}", exc_info=True)
+        #     self._http_client_session = None
+        self._http_client_session = None  # Just clear the reference
 
         if self._transport: # For StdioTransport
             try:
