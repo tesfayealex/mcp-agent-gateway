@@ -24,9 +24,61 @@ import asyncio # For async handle_message
 import aiohttp # Import aiohttp
 import threading
 import concurrent.futures
+import uuid
+import time
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+async def retry_with_exponential_backoff(
+    operation, 
+    max_retries: int = 2, 
+    base_delay: float = 1.0,
+    max_delay: float = 10.0,
+    backoff_factor: float = 2.0,
+    retryable_errors: tuple = (Exception,)
+):
+    """
+    Retry an async operation with exponential backoff.
+    
+    Args:
+        operation: Async function to retry
+        max_retries: Maximum number of retry attempts
+        base_delay: Initial delay between retries in seconds
+        max_delay: Maximum delay between retries in seconds
+        backoff_factor: Factor to multiply delay by after each retry
+        retryable_errors: Tuple of exception types that should trigger a retry
+    
+    Returns:
+        Result of the operation if successful
+        
+    Raises:
+        The last exception if all retries fail
+    """
+    last_exception = None
+    delay = base_delay
+    
+    for attempt in range(max_retries + 1):  # +1 for initial attempt
+        try:
+            return await operation()
+        except retryable_errors as e:
+            last_exception = e
+            
+            # Don't retry certain types of errors
+            error_str = str(e).lower()
+            if any(no_retry in error_str for no_retry in ["authentication", "unauthorized", "forbidden", "not found"]):
+                logger.info(f"Non-retryable error encountered: {e}")
+                raise e
+            
+            if attempt == max_retries:
+                logger.error(f"All {max_retries + 1} attempts failed. Last error: {e}")
+                break
+                
+            logger.warning(f"Attempt {attempt + 1} failed with error: {e}. Retrying in {delay:.1f} seconds...")
+            await asyncio.sleep(delay)
+            delay = min(delay * backoff_factor, max_delay)
+    
+    raise last_exception
 
 class DevAssistantAgent:
     """
@@ -161,29 +213,89 @@ class DevAssistantAgent:
                                         try:
                                             parsed_args = json.loads(inner_kwargs)
                                             logger.info(f"🔧 Parsed JSON from kwargs field: {parsed_args}")
-                                        except json.JSONDecodeError:
-                                            logger.error(f"🔧 Failed to parse JSON from kwargs field: {inner_kwargs}")
+                                        except json.JSONDecodeError as e:
+                                            logger.error(f"🔧 Failed to parse JSON from kwargs field: {inner_kwargs}, error: {e}")
+                                            
+                                            # Enhanced parsing logic for various string formats
                                             parsed_args = {}
+                                            
+                                            # Try to parse as query string format like "query=user:tesfayealex"
+                                            if '=' in inner_kwargs:
+                                                try:
+                                                    # Simple parsing for key=value pairs
+                                                    pairs = inner_kwargs.split('&') if '&' in inner_kwargs else [inner_kwargs]
+                                                    for pair in pairs:
+                                                        if '=' in pair:
+                                                            key, value = pair.split('=', 1)
+                                                            # Decode URL-encoded values if needed
+                                                            key = key.strip()
+                                                            value = value.strip()
+                                                            # Handle quoted values
+                                                            if value.startswith('"') and value.endswith('"'):
+                                                                value = value[1:-1]
+                                                            parsed_args[key] = value
+                                                    logger.info(f"🔧 Parsed query string format: {parsed_args}")
+                                                except Exception as parse_e:
+                                                    logger.error(f"🔧 Failed to parse as query string: {parse_e}")
+                                            
+                                            # If we still don't have args, try to extract from the tool name or description
+                                            if not parsed_args:
+                                                # For search tools, assume the string is a query
+                                                if 'search' in tl_name.lower():
+                                                    parsed_args = {'q': inner_kwargs}
+                                                    logger.info(f"🔧 Assumed search query: {parsed_args}")
+                                                elif 'query' in tl_name.lower():
+                                                    parsed_args = {'query': inner_kwargs}
+                                                    logger.info(f"🔧 Assumed query parameter: {parsed_args}")
+                                                else:
+                                                    # Last resort: try common parameter names
+                                                    logger.warning(f"🔧 Using fallback parameter parsing for: {inner_kwargs}")
+                                                    # Check if it looks like just a value without a key
+                                                    if inner_kwargs and not any(char in inner_kwargs for char in ['=', '{', '[', ':']):
+                                                        # Try common parameter names based on tool name
+                                                        if 'github' in tl_name.lower():
+                                                            if 'search' in tl_name.lower() and 'repo' in tl_name.lower():
+                                                                parsed_args = {'query': inner_kwargs}
+                                                            elif 'user' in tl_name.lower():
+                                                                parsed_args = {'q': f"user:{inner_kwargs}"}
+                                                            else:
+                                                                parsed_args = {'query': inner_kwargs}
+                                                        else:
+                                                            parsed_args = {'query': inner_kwargs}
+                                                        logger.info(f"🔧 Applied fallback parsing: {parsed_args}")
                                     else:
+                                        # Handle non-string, non-dict values
+                                        logger.warning(f"🔧 Unexpected kwargs type: {type(inner_kwargs)}, value: {inner_kwargs}")
                                         parsed_args = {}
                                 else:
                                     # Use arguments directly
                                     parsed_args = kwargs
                                     logger.info(f"🔧 Using direct args: {parsed_args}")
                                 
+                                # Validate that we have some arguments for tools that require them
+                                if not parsed_args:
+                                    logger.warning(f"🔧 No arguments parsed for tool {tl_name}, this may cause validation errors")
+                                    # For search tools, provide a helpful error message
+                                    if 'search' in tl_name.lower():
+                                        return f"Error: Search tools require a query parameter. Please provide what you want to search for."
+                                
                                 async def async_call():
-                                    transport = SSETransport(url=proxy_url)
-                                    async with Client(transport=transport) as client:
-                                        try:
-                                            # Always use call_tool with arguments parameter
-                                            if parsed_args:
-                                                result = await client.call_tool(tl_name, arguments=parsed_args)
-                                            else:
-                                                result = await client.call_tool(tl_name)
-                                            return result
-                                        except Exception as e:
-                                            logger.error(f"🔧 Error calling tool {tl_name}: {e}")
-                                            return {"error": str(e)}
+                                    try:
+                                        transport = SSETransport(url=proxy_url)
+                                        async with Client(transport=transport) as client:
+                                            try:
+                                                # Always use call_tool with arguments parameter
+                                                if parsed_args:
+                                                    result = await client.call_tool(tl_name, arguments=parsed_args)
+                                                else:
+                                                    result = await client.call_tool(tl_name)
+                                                return result
+                                            except Exception as e:
+                                                logger.error(f"🔧 Error calling tool {tl_name}: {e}")
+                                                return {"error": f"Error executing tool {tl_name}: {str(e)}"}
+                                    except Exception as e:
+                                        logger.error(f"🔧 Error connecting to MCP proxy for tool {tl_name}: {e}")
+                                        return {"error": f"Error connecting to MCP proxy: {str(e)}"}
 
                                 def run_in_thread():
                                     new_loop = asyncio.new_event_loop()
@@ -200,10 +312,10 @@ class DevAssistantAgent:
                                         result = future.result(timeout=60)
                                 except concurrent.futures.TimeoutError:
                                     logger.error(f"🔧 Timeout (60s) waiting for {tl_name} to complete")
-                                    return f"Error: Tool {tl_name} timed out"
+                                    return f"Error: Tool {tl_name} timed out after 60 seconds"
                                 except Exception as e:
                                     logger.error(f"🔧 Error in thread execution for {tl_name}: {e}")
-                                    return f"Error executing {tl_name}: {e}"
+                                    return f"Error executing {tl_name}: {str(e)}"
                                 
                                 logger.info(f"🔧 TOOL {tl_name} RESULT: {result}")
                                 
@@ -293,7 +405,16 @@ class DevAssistantAgent:
             logger.info("Invoking agent with conversation context...")
             logger.info(f"Full conversation context being sent: {conversation_context}")
             
-            agent_response = await self.agent.run(conversation_context)
+            # Use retry mechanism for agent execution
+            async def run_agent():
+                return await self.agent.run(conversation_context)
+            
+            agent_response = await retry_with_exponential_backoff(
+                run_agent,
+                max_retries=2,
+                base_delay=1.0,
+                retryable_errors=(Exception,)  # Most errors are retryable except for specific ones handled in retry function
+            )
             
             logger.info(f"Agent returned response type: {type(agent_response)}")
             logger.info(f"Agent response: {agent_response}")
@@ -312,7 +433,26 @@ class DevAssistantAgent:
             
         except Exception as e:
             logger.error(f"Error during agent query execution: {e}", exc_info=True)
-            response_text = "I encountered an error trying to process your request. Please try again."
+            
+            # Provide more specific error messages based on the error type
+            if "AttributeError" in str(e) and "block_reason" in str(e):
+                response_text = "I encountered a temporary issue with the language model. Let me try a different approach to help you."
+            elif "validation error" in str(e).lower() and "missing_argument" in str(e).lower():
+                response_text = "I had trouble understanding the required parameters for that operation. Could you please rephrase your request or provide more specific details?"
+            elif "tool" in str(e).lower() and ("timeout" in str(e).lower() or "error" in str(e).lower()):
+                response_text = "I encountered an issue with one of the tools I was trying to use. This might be a temporary problem. Please try your request again, or let me know if you'd like to try a different approach."
+            elif "connection" in str(e).lower() or "proxy" in str(e).lower():
+                response_text = "I'm having trouble connecting to some of my tools right now. I can still help with general questions and information from my knowledge base. What would you like to know?"
+            else:
+                response_text = "I encountered an unexpected error while processing your request. Please try rephrasing your question or let me know if you need help with something specific."
+            
+            # Add helpful suggestions based on common use cases
+            if any(keyword in user_query.lower() for keyword in ["github", "repository", "repo", "pull request", "pr", "issue"]):
+                response_text += "\n\nIf you're looking for GitHub-related help, I can assist with:\n- Searching repositories\n- Creating issues or pull requests\n- Reviewing code\n- Managing branches\n\nPlease try rephrasing your request with more specific details."
+            elif any(keyword in user_query.lower() for keyword in ["file", "directory", "folder", "read", "write", "edit"]):
+                response_text += "\n\nIf you're looking for file operations, I can help with:\n- Reading file contents\n- Creating or editing files\n- Listing directory contents\n- Searching for files\n\nPlease try rephrasing your request with more specific file paths or operations."
+            elif any(keyword in user_query.lower() for keyword in ["code", "programming", "development", "debug"]):
+                response_text += "\n\nI can help with programming and development questions using my knowledge base. Please feel free to ask about specific programming concepts, best practices, or debugging approaches."
             
             # Still add the error response to history for context
             assistant_message = ChatMessage(role=MessageRole.ASSISTANT, content=response_text)

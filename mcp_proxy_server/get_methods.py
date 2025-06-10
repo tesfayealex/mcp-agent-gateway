@@ -1,10 +1,11 @@
 import asyncio
 import logging
 import inspect
-from typing import Any, Dict, Callable
+from typing import Any, Dict, Callable, Union, Optional
 
 from fastmcp import FastMCP
 from fastmcp.tools import Tool as FastMCPToolDef
+from fastmcp.tools.tool import Tool as FastMCPTool  # Import the actual Tool class for direct creation
 # import fastmcp.tools # Removed if not used elsewhere
 # import fastmcp.utilities # Removed if not used elsewhere
 
@@ -45,88 +46,116 @@ async def _create_proxied_tool_callable(
         raise
 
 
-def _create_dynamic_wrapper_function(server_wrapper: MCPClientWrapper, original_tool_name: str, original_tool_description: str, tool_def: FastMCPToolDef) -> Callable:
+def _create_dynamic_wrapper_function(tool_def, downstream_client, server_name):
     """
-    Creates a dynamic wrapper function with the proper signature that FastMCP expects.
-    Instead of accepting arguments as a dict, we create a function with individual parameters
-    that match the original tool's schema.
+    Create a dynamic wrapper function that preserves the original tool's parameter schema.
+    Instead of letting FastMCP generate schema from function signature, we create Tool objects
+    directly with the preserved original schema.
     """
-    # Extract parameter information from the tool definition
-    parameters_schema = getattr(tool_def, 'parameters', {})
-    properties = parameters_schema.get('properties', {}) if parameters_schema else {}
-    required_params = set(parameters_schema.get('required', [])) if parameters_schema else set()
+    # Extract the original parameter schema from the tool definition
+    original_schema = getattr(tool_def, 'inputSchema', None) or getattr(tool_def, 'parameters', {})
     
-    logger.debug(f"Creating wrapper for '{original_tool_name}' with schema: {parameters_schema}")
+    logger.debug(f"Creating wrapper for tool {tool_def.name} with schema: {original_schema}")
     
-    # Build the function signature dynamically
-    param_annotations = {}
-    param_defaults = {}
-    
-    for param_name, param_schema in properties.items():
-        # Map JSON Schema types to Python types
-        param_type = param_schema.get('type', 'string')
-        python_type = Any  # Default fallback
-        
-        if param_type == 'string':
-            python_type = str
-        elif param_type == 'integer':
-            python_type = int
-        elif param_type == 'number':
-            python_type = float
-        elif param_type == 'boolean':
-            python_type = bool
-        elif param_type == 'array':
-            python_type = list
-        elif param_type == 'object':
-            python_type = dict
-        
-        # Handle optional parameters (not in required list)
-        if param_name not in required_params:
-            python_type = python_type | None  # Make it optional using union syntax
-            param_defaults[param_name] = None
-        
-        param_annotations[param_name] = python_type
-    
-    # Create the wrapper function dynamically
-    def create_wrapper():
-        async def dynamic_wrapper(**kwargs) -> Any:
-            # Convert kwargs back to the arguments dict that the downstream tool expects
-            return await _create_proxied_tool_callable(
-                server_wrapper=server_wrapper,
-                original_tool_name=original_tool_name,
-                arguments=kwargs
-            )
-        
-        return dynamic_wrapper
-    
-    wrapper_func = create_wrapper()
-    
-    # Set the function signature dynamically
-    # Create Parameter objects for the signature
+    # Build function signature based on original schema
     sig_params = []
-    for param_name, param_type in param_annotations.items():
-        default_value = param_defaults.get(param_name, inspect.Parameter.empty)
-        param = inspect.Parameter(
-            name=param_name,
-            kind=inspect.Parameter.KEYWORD_ONLY,
-            default=default_value,
-            annotation=param_type
-        )
-        sig_params.append(param)
+    annotations = {}
     
-    # Set the signature on the wrapper function
-    new_signature = inspect.Signature(parameters=sig_params, return_annotation=Any)
-    wrapper_func.__signature__ = new_signature
+    if original_schema and isinstance(original_schema, dict):
+        properties = original_schema.get('properties', {})
+        required = original_schema.get('required', [])
+        
+        # Sort parameters: required first, then optional
+        # This prevents "non-default argument follows default argument" error
+        required_params = []
+        optional_params = []
+        
+        for param_name, param_info in properties.items():
+            # Map JSON schema types to Python types
+            param_type = str  # Default to str
+            if param_info.get('type') == 'integer':
+                param_type = int
+            elif param_info.get('type') == 'number':
+                param_type = float
+            elif param_info.get('type') == 'boolean':
+                param_type = bool
+            elif param_info.get('type') == 'array':
+                param_type = list
+            elif param_info.get('type') == 'object':
+                param_type = dict
+            
+            # Create parameter with default if not required
+            if param_name in required:
+                param = inspect.Parameter(param_name, inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=param_type)
+                required_params.append(param)
+            else:
+                param = inspect.Parameter(param_name, inspect.Parameter.POSITIONAL_OR_KEYWORD, 
+                                        annotation=param_type, default=None)
+                optional_params.append(param)
+            
+            annotations[param_name] = param_type
+        
+        # Combine required parameters first, then optional
+        sig_params = required_params + optional_params
     
-    # Set proper metadata for FastMCP
-    wrapper_func.__name__ = f"{server_wrapper.config.name}_{original_tool_name}"
-    wrapper_func.__doc__ = f"[Proxied from {server_wrapper.config.name}] {original_tool_description}"
-    wrapper_func.__annotations__ = param_annotations.copy()
-    wrapper_func.__annotations__['return'] = Any
+    # Create the dynamic wrapper function
+    async def wrapper_func(**kwargs):
+        logger.debug(f"Calling tool {tool_def.name} with args: {kwargs}")
+        try:
+            result = await downstream_client.call_tool(tool_def.name, kwargs)
+            logger.debug(f"Tool {tool_def.name} returned: {result}")
+            return result
+        except Exception as e:
+            logger.error(f"Error calling tool {tool_def.name}: {e}")
+            raise
     
-    logger.debug(f"Created wrapper function with signature: {new_signature}")
+    # Set function metadata
+    wrapper_func.__name__ = tool_def.name
+    wrapper_func.__doc__ = tool_def.description or f"Proxied tool {tool_def.name} from {server_name}"
+    wrapper_func.__annotations__ = annotations
+    wrapper_func.__signature__ = inspect.Signature(sig_params)
+    
+    # Store the original schema for direct Tool creation
+    wrapper_func.__schema__ = original_schema
+    
+    logger.debug(f"Created wrapper function for {tool_def.name} with preserved schema")
     
     return wrapper_func
+
+
+def _register_tools_with_fastmcp(app, tools_by_server):
+    """
+    Register tools with FastMCP using direct Tool creation to preserve schemas.
+    """
+    from fastmcp.tools import Tool
+    
+    for server_name, tools in tools_by_server.items():
+        logger.info(f"Registering {len(tools)} tools from {server_name}")
+        
+        for tool_func in tools:
+            try:
+                # Get the preserved schema
+                original_schema = getattr(tool_func, '__schema__', {})
+                
+                # Create Tool directly with preserved schema
+                tool = Tool(
+                    fn=tool_func,
+                    name=tool_func.__name__,
+                    description=tool_func.__doc__ or f"Proxied tool from {server_name}",
+                    parameters=original_schema,
+                    tags=set(),
+                    annotations=None,
+                    serializer=None
+                )
+                
+                # Add the tool directly to the tool manager
+                app._tool_manager.add_tool(tool)
+                
+                logger.debug(f"Registered tool {tool_func.__name__} with schema: {original_schema}")
+                
+            except Exception as e:
+                logger.error(f"Failed to register tool {tool_func.__name__}: {e}")
+                continue
 
 
 async def register_downstream_tools_on_proxy(
@@ -135,34 +164,17 @@ async def register_downstream_tools_on_proxy(
 ):
     """
     Fetches tools from all connected downstream MCP servers and registers them
-    on the main proxy_mcp_instance.
+    on the main proxy_mcp_instance using direct Tool creation to preserve schemas.
     """
     logger.info("Starting registration of downstream tools on the proxy...")
-    registered_tool_count = 0
-    
-    # Debug: Check proxy tools before registration
-    logger.info("=== DEBUGGING: Checking proxy tools before downstream registration ===")
-    try:
-        # Check if proxy has any tools already
-        if hasattr(proxy_mcp_instance, '_tools'):
-            logger.info(f"Proxy instance has _tools attribute: {proxy_mcp_instance._tools}")
-        if hasattr(proxy_mcp_instance, 'tools'):
-            logger.info(f"Proxy instance has tools attribute: {proxy_mcp_instance.tools}")
-        
-        # Try to get the current tools via list_tools if available
-        if hasattr(proxy_mcp_instance, 'list_tools'):
-            current_tools = await proxy_mcp_instance.list_tools()
-            logger.info(f"Current tools in proxy (via list_tools): {current_tools}")
-        else:
-            logger.info("Proxy instance doesn't have list_tools method")
-            
-    except Exception as e:
-        logger.error(f"Error checking existing proxy tools: {e}")
     
     if not connection_manager.server_handlers:
         logger.warning("No server handlers found in connection manager. No downstream tools to register.")
         return
 
+    # Collect all tools by server
+    tools_by_server = {}
+    
     for server_name, wrapper in connection_manager.server_handlers.items():
         if not wrapper.config.enabled:
             logger.debug(f"Skipping server '{server_name}': disabled in config.")
@@ -177,7 +189,7 @@ async def register_downstream_tools_on_proxy(
             # list_tools() should return List[fastmcp.tools.Tool]
             downstream_tools: list[FastMCPToolDef] = await wrapper.list_tools()
 
-            if downstream_tools is None: # Should not happen if list_tools is well-behaved
+            if downstream_tools is None:
                 logger.error(f"Failed to retrieve tools from '{server_name}'; server returned None. Skipping.")
                 continue
             if not isinstance(downstream_tools, list):
@@ -186,8 +198,9 @@ async def register_downstream_tools_on_proxy(
             
             logger.debug(f"Successfully fetched {len(downstream_tools)} tool definitions from '{server_name}'.")
 
+            server_tools = []
             for tool_def in downstream_tools:
-                logger.debug(f"Processing tool_def from '{server_name}': {tool_def}") # Log the raw tool_def
+                logger.debug(f"Processing tool_def from '{server_name}': {tool_def}")
 
                 if not hasattr(tool_def, 'name') or not tool_def.name:
                     logger.warning(f"Found a tool from server '{server_name}' without a name. Skipping: {tool_def}")
@@ -199,65 +212,39 @@ async def register_downstream_tools_on_proxy(
                 original_description = getattr(tool_def, 'description', "No description provided.")
                 proxied_description = f"[Proxied from {server_name}] {original_description}"
 
-                # Create a clean wrapper function with proper signature based on tool schema
+                # Create wrapper function with preserved schema
                 wrapper_function = _create_dynamic_wrapper_function(
-                    server_wrapper=wrapper,
-                    original_tool_name=original_tool_name,
-                    original_tool_description=original_description,
-                    tool_def=tool_def
+                    tool_def=tool_def,
+                    downstream_client=wrapper,
+                    server_name=server_name
                 )
-
-                tool_params_for_log = getattr(tool_def, 'parameters', "N/A")
-                logger.debug(f"Attempting to add tool to proxy: Name='{prefixed_tool_name}', OriginalName='{original_tool_name}', Description='{proxied_description}', OriginalParams='{tool_params_for_log}'")
                 
-                # Debug: Check the wrapper function signature
-                try:
-                    sig = inspect.signature(wrapper_function)
-                    logger.debug(f"Wrapper function signature for '{prefixed_tool_name}': {sig}")
-                except Exception as e:
-                    logger.error(f"Could not inspect signature of wrapper function: {e}")
+                # Update the function name to include server prefix
+                wrapper_function.__name__ = prefixed_tool_name
+                wrapper_function.__doc__ = proxied_description
+                
+                server_tools.append(wrapper_function)
+                logger.debug(f"Created wrapper function for '{prefixed_tool_name}' with preserved schema")
 
-                try:
-                    logger.debug(f"About to call proxy_mcp_instance.add_tool for '{prefixed_tool_name}'...")
-                    proxy_mcp_instance.add_tool(
-                        fn=wrapper_function,
-                        name=prefixed_tool_name,
-                        description=proxied_description,
-                    )
-                    logger.info(f"Successfully ADDED tool '{prefixed_tool_name}' (from '{server_name}.{original_tool_name}') to proxy instance.")
-                    registered_tool_count += 1
-                    
-                    # Debug: Check if tool was actually added
-                    try:
-                        if hasattr(proxy_mcp_instance, '_tools'):
-                            logger.debug(f"After adding '{prefixed_tool_name}', proxy _tools keys: {list(proxy_mcp_instance._tools.keys()) if proxy_mcp_instance._tools else 'None'}")
-                        if hasattr(proxy_mcp_instance, 'tools'):
-                            logger.debug(f"After adding '{prefixed_tool_name}', proxy tools keys: {list(proxy_mcp_instance.tools.keys()) if proxy_mcp_instance.tools else 'None'}")
-                    except Exception as e:
-                        logger.error(f"Error checking proxy tools after adding '{prefixed_tool_name}': {e}")
-                        
-                except Exception as e:
-                    logger.error(f"Failed to ADD tool '{prefixed_tool_name}' to proxy instance: {e}", exc_info=True)
+            tools_by_server[server_name] = server_tools
 
         except Exception as e:
             logger.error(f"Error processing tools for server '{server_name}': {e}", exc_info=True)
     
-    # Debug: Check proxy tools after registration
-    logger.info("=== DEBUGGING: Checking proxy tools after downstream registration ===")
-    try:
-        if hasattr(proxy_mcp_instance, '_tools'):
-            logger.info(f"Final proxy _tools: {proxy_mcp_instance._tools}")
-        if hasattr(proxy_mcp_instance, 'tools'):
-            logger.info(f"Final proxy tools: {proxy_mcp_instance.tools}")
-            
-        # Try to get the final tools via list_tools if available
-        if hasattr(proxy_mcp_instance, 'list_tools'):
-            final_tools = await proxy_mcp_instance.list_tools()
-            logger.info(f"Final tools in proxy (via list_tools): {final_tools}")
-        else:
-            logger.info("Proxy instance doesn't have list_tools method")
-            
-    except Exception as e:
-        logger.error(f"Error checking final proxy tools: {e}")
+    # Register all tools with FastMCP using direct Tool creation
+    _register_tools_with_fastmcp(proxy_mcp_instance, tools_by_server)
     
-    logger.info(f"Completed downstream tool registration. Total tools registered: {registered_tool_count}") 
+    # Count total registered tools
+    total_tools = sum(len(tools) for tools in tools_by_server.values())
+    logger.info(f"Completed downstream tool registration. Total tools registered: {total_tools}")
+    
+    # Debug: Check final tools
+    try:
+        final_tools = await proxy_mcp_instance.list_tools()
+        logger.info(f"Final tools in proxy: {len(final_tools)} tools")
+        # Log first few with their schemas
+        for i, tool in enumerate(final_tools[:3]):
+            logger.info(f"Final tool {i+1}: {tool.name}")
+            logger.info(f"  Input Schema: {getattr(tool, 'inputSchema', 'N/A')}")
+    except Exception as e:
+        logger.error(f"Error checking final proxy tools: {e}") 

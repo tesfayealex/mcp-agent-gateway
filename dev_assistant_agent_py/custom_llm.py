@@ -315,7 +315,20 @@ class GeminiCustomLLM(FunctionCallingLLM):
         #     },
         # )
 
-        openai_tool_schema = tool.metadata.to_openai_tool()
+        try:
+            openai_tool_schema = tool.metadata.to_openai_tool()
+            logger.debug(f"Converting tool {tool.metadata.name} with OpenAI schema: {openai_tool_schema}")
+        except Exception as e:
+            logger.error(f"Error converting tool {tool.metadata.name} to OpenAI schema: {e}")
+            # Create a simple fallback schema
+            openai_tool_schema = {
+                "type": "function",
+                "function": {
+                    "name": tool.metadata.name,
+                    "description": tool.metadata.description or f"Tool: {tool.metadata.name}",
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            }
         
         # Basic type mapping from OpenAPI to Gemini/JSON Schema
         # This might need to be more robust for complex schemas
@@ -333,7 +346,7 @@ class GeminiCustomLLM(FunctionCallingLLM):
             return "STRING" # Default to STRING
 
         gemini_params = {}
-        if "parameters" in openai_tool_schema["function"] and openai_tool_schema["function"]["parameters"]["properties"]:
+        if "parameters" in openai_tool_schema["function"] and openai_tool_schema["function"]["parameters"].get("properties"):
             gemini_params = {
                 "type": "OBJECT", # Gemini seems to use uppercase for OBJECT type
                 "properties": {},
@@ -352,11 +365,14 @@ class GeminiCustomLLM(FunctionCallingLLM):
 
                 gemini_params["properties"][name] = prop_details
         
-        return genai.types.FunctionDeclaration(
+        function_declaration = genai.types.FunctionDeclaration(
             name=openai_tool_schema["function"]["name"],
             description=openai_tool_schema["function"]["description"],
             parameters=gemini_params if gemini_params.get("properties") else None # Pass None if no properties
         )
+        
+        logger.debug(f"Created Gemini function declaration for {tool.metadata.name}: {function_declaration}")
+        return function_declaration
 
     def chat_with_tools(
         self, tools: List[BaseTool], user_msg: Optional[str] = None, chat_history: Optional[List[ChatMessage]] = None, verbose: bool = False, allow_parallel_tool_calls: bool = False, **kwargs: Any
@@ -511,12 +527,14 @@ class GeminiCustomLLM(FunctionCallingLLM):
         if not tool_selections and not response_message_content:
              # If no tool calls and no text, it might be a block or empty response
             finish_reason = gemini_response.candidates[0].finish_reason if gemini_response.candidates else "UNKNOWN"
-            prompt_feedback = gemini_response.prompt_feedback if hasattr(gemini_response, 'prompt_feedback') else "N/A"
+            prompt_feedback = gemini_response.prompt_feedback if hasattr(gemini_response, 'prompt_feedback') else None
             logger.warning(f"No tool selections or text content from Gemini. Finish reason: {finish_reason}. Prompt Feedback: {prompt_feedback}")
-            # Check for blocking
-            if hasattr(gemini_response, 'prompt_feedback') and gemini_response.prompt_feedback.block_reason:
+            # Check for content safety blocks
+            if (gemini_response.prompt_feedback and 
+                hasattr(gemini_response.prompt_feedback, 'block_reason') and
+                gemini_response.prompt_feedback.block_reason):
                 response_message_content = f"Blocked by API. Reason: {gemini_response.prompt_feedback.block_reason}"
-                if gemini_response.prompt_feedback.block_reason_message:
+                if hasattr(gemini_response.prompt_feedback, 'block_reason_message') and gemini_response.prompt_feedback.block_reason_message:
                     response_message_content += f" Message: {gemini_response.prompt_feedback.block_reason_message}"
             else:
                 response_message_content = "Received an empty or unexpected response from the LLM."

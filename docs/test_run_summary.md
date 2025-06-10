@@ -1,93 +1,24 @@
 # Test Run Summary
 
-**Run Date:** 2025-06-01 11:11:34
-**Total Duration:** 2.55 seconds
-**Total Tests:** 5
-**Passed:** 2 | **Failed:** 1 | **Skipped:** 2
+**Run Date:** 2025-06-09 18:32:29
+**Total Duration:** 1.09 seconds
+**Total Tests:** 1
+**Passed:** 1 | **Failed:** 0 | **Skipped:** 0
 
 ## Test Results
 
 ### ✅ test_proxy_tools_visibility
 - **Status:** PASSED
-- **Duration:** 0.00s
-- **Details:** Found 3 tools
-
-### ❌ test_native_proxy_tools
-- **Status:** FAILED
 - **Duration:** 0.01s
-- **Details:** No connected and enabled server found for testing
-assert None is not None
-
-### ⏭️ test_github_tools
-- **Status:** SKIPPED
-- **Duration:** 0.01s
-- **Details:** GitHub tool 'GITHUB_get_me' not found
-
-### ⏭️ test_filesystem_tools
-- **Status:** SKIPPED
-- **Duration:** 0.01s
-- **Details:** Filesystem tool 'filesystem_list_directory' not found
-
-### ✅ test_tool_call_integration
-- **Status:** PASSED
-- **Duration:** 0.27s
-- **Details:** Integration test completed successfully
+- **Details:** Found 50 tools
 
 ## Test Execution Logs
 
 ```
-[11:11:35.471] INFO: === Starting test_proxy_tools_visibility ===
-[11:11:35.476] INFO: All tools reported by proxy: ['list_managed_servers', 'get_server_tools', 'call_server_tool']
-[11:11:35.476] INFO: ✓ Found expected native tool: list_managed_servers
-[11:11:35.476] INFO: ✓ Found expected native tool: get_server_tools
-[11:11:35.476] WARNING: ✗ Missing expected GitHub tool: GITHUB_get_me
-[11:11:35.476] WARNING: ✗ Missing expected filesystem tool: filesystem_list_directory
-[11:11:35.923] INFO: === Starting test_native_proxy_tools ===
-[11:11:35.923] INFO: Testing 'list_managed_servers'...
-[11:11:35.927] INFO: Found 2 managed servers
-[11:11:35.928] ERROR: Test test_native_proxy_tools failed: No connected and enabled server found for testing
-assert None is not None
-[11:11:36.352] INFO: === Starting test_github_tools ===
-[11:11:36.795] INFO: === Starting test_filesystem_tools ===
-[11:11:37.203] INFO: === Starting test_tool_call_integration ===
-[11:11:37.469] INFO: Server 'GITHUB' has 38 tools
-[11:11:37.469] WARNING: ✗ Proxied tool missing: GITHUB_add_issue_comment
-[11:11:37.469] WARNING: ✗ Proxied tool missing: GITHUB_add_pull_request_review_comment
-[11:11:37.469] WARNING: ✗ Proxied tool missing: GITHUB_create_branch
-[11:11:37.469] WARNING: ✗ Proxied tool missing: GITHUB_create_issue
-[11:11:37.469] WARNING: ✗ Proxied tool missing: GITHUB_create_or_update_file
-[11:11:37.469] WARNING: ✗ Proxied tool missing: GITHUB_create_pull_request
-[11:11:37.469] WARNING: ✗ Proxied tool missing: GITHUB_create_pull_request_review
-[11:11:37.469] WARNING: ✗ Proxied tool missing: GITHUB_create_repository
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_fork_repository
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_get_code_scanning_alert
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_get_commit
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_get_file_contents
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_get_issue
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_get_issue_comments
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_get_me
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_get_pull_request
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_get_pull_request_comments
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_get_pull_request_files
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_get_pull_request_reviews
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_get_pull_request_status
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_get_secret_scanning_alert
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_get_tag
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_list_branches
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_list_code_scanning_alerts
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_list_commits
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_list_issues
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_list_pull_requests
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_list_secret_scanning_alerts
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_list_tags
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_merge_pull_request
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_push_files
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_search_code
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_search_issues
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_search_repositories
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_search_users
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_update_issue
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_update_pull_request
-[11:11:37.470] WARNING: ✗ Proxied tool missing: GITHUB_update_pull_request_branch
-[11:11:37.473] INFO: ✓ Integration test completed
+[18:32:30.290] INFO: === Starting test_proxy_tools_visibility ===
+[18:32:30.296] INFO: All tools reported by proxy: ['list_managed_servers', 'GITHUB_add_issue_comment', 'GITHUB_add_pull_request_review_comment', 'GITHUB_create_branch', 'GITHUB_create_issue', 'GITHUB_create_or_update_file', 'GITHUB_create_pull_request', 'GITHUB_create_pull_request_review', 'GITHUB_create_repository', 'GITHUB_fork_repository', 'GITHUB_get_code_scanning_alert', 'GITHUB_get_commit', 'GITHUB_get_file_contents', 'GITHUB_get_issue', 'GITHUB_get_issue_comments', 'GITHUB_get_me', 'GITHUB_get_pull_request', 'GITHUB_get_pull_request_comments', 'GITHUB_get_pull_request_files', 'GITHUB_get_pull_request_reviews', 'GITHUB_get_pull_request_status', 'GITHUB_get_secret_scanning_alert', 'GITHUB_get_tag', 'GITHUB_list_branches', 'GITHUB_list_code_scanning_alerts', 'GITHUB_list_commits', 'GITHUB_list_issues', 'GITHUB_list_pull_requests', 'GITHUB_list_secret_scanning_alerts', 'GITHUB_list_tags', 'GITHUB_merge_pull_request', 'GITHUB_push_files', 'GITHUB_search_code', 'GITHUB_search_issues', 'GITHUB_search_repositories', 'GITHUB_search_users', 'GITHUB_update_issue', 'GITHUB_update_pull_request', 'GITHUB_update_pull_request_branch', 'filesystem_read_file', 'filesystem_read_multiple_files', 'filesystem_write_file', 'filesystem_edit_file', 'filesystem_create_directory', 'filesystem_list_directory', 'filesystem_directory_tree', 'filesystem_move_file', 'filesystem_search_files', 'filesystem_get_file_info', 'filesystem_list_allowed_directories']
+[18:32:30.296] INFO: ✓ Found expected native tool: list_managed_servers
+[18:32:30.296] WARNING: ✗ Missing expected native tool: get_server_tools
+[18:32:30.296] INFO: ✓ Found expected GitHub tool: GITHUB_get_me
+[18:32:30.296] INFO: ✓ Found expected filesystem tool: filesystem_list_directory
 ```
