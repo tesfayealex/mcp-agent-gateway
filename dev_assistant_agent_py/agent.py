@@ -15,7 +15,7 @@ from custom_llm import GeminiCustomLLM # Direct import for dev/testing
 # from .custom_embedder import GeminiCustomEmbedding # Package import
 from custom_embedder import GeminiCustomEmbedding # Direct import
 
-from typing import List, Optional, Any, Dict
+from typing import List, Optional, Any, Dict, Union, Callable
 import logging
 import os
 import json
@@ -26,6 +26,9 @@ import threading
 import concurrent.futures
 import uuid
 import time
+import inspect
+from pydantic import BaseModel, Field, create_model
+from llama_index.core.tools.query_engine import ToolMetadata
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -158,187 +161,345 @@ class DevAssistantAgent:
         mcp_proxy_url: str, 
         rag_query_engine: BaseQueryEngine,
     ) -> List[BaseTool]:
-        """
-        Discover and create all available tools from the MCP proxy and RAG engine.
-        Uses standard MCP calls without server_name references.
-        """
+        """Sets up tools by combining local RAG tools with tools from MCP proxy."""
         all_tools = []
         
-        # 1. Add the local RAG query engine tool first
-        local_knowledge_tool = QueryEngineTool.from_defaults(
+        # Add the local knowledge base tool first
+        rag_tool = QueryEngineTool.from_defaults(
             query_engine=rag_query_engine,
             name="LocalKnowledgeBaseSearch",
-            description="Search the local knowledge base for development-related information, documentation, and best practices. Use this when users ask general development questions."
+            description="Use this tool to search the local knowledge base for development information, documentation, commit codes, and explanations of concepts. Good for general programming questions and explanations.",
         )
-        all_tools.append(local_knowledge_tool)
+        all_tools.append(rag_tool)
         
-        # 2. MCP proxy tools - simplified approach using SSE transport
+        logger.info(f"✅ Added local RAG tool: {rag_tool.metadata.name}")
+
+        # Fetch MCP proxy tools using SSE transport
         try:
             logger.info(f"🔧 Discovering MCP proxy tools from {mcp_proxy_url}")
             
-            # Create temporary client to discover tools
+            # Create temporary client to discover tools using SSE transport
             temp_transport = SSETransport(url=mcp_proxy_url)
             temp_mcp_client = Client(transport=temp_transport)
             
             async with temp_mcp_client:
                 # Get all available tools from the proxy
                 proxy_tools = await temp_mcp_client.list_tools()
-                logger.info(f"🔧 Found {len(proxy_tools)} tools from proxy")
                 
-                for tool_info in proxy_tools:
-                    if hasattr(tool_info, 'name') and hasattr(tool_info, 'description'):
-                        tool_name = tool_info.name
-                        tool_description = tool_info.description
+                print("proxy tools:")
+                tools = proxy_tools if proxy_tools else []
+                print("found tools: ")
+                
+                if not tools:
+                    logger.warning("⚠️ No tools found from MCP proxy")
+                else:
+                    logger.info(f"🔧 Found {len(tools)} tools from MCP proxy")
+                
+                for tool in tools:
+                    if hasattr(tool, 'name') and hasattr(tool, 'description'):
+                        tool_name = tool.name
+                        tool_description = tool.description
+                        tool_schema = getattr(tool, 'inputSchema', None)
                         
-                        logger.info(f"🔧 Creating proxy tool: {tool_name}")
+                        logger.info(f"🔧 Processing MCP tool: {tool_name}")
+                        logger.info(f"🔧 Tool description: {tool_description}")
+                        logger.info(f"🔧 Tool schema: {tool_schema}")
                         
-                        # Get tool schema to understand expected parameters
-                        tool_schema = getattr(tool_info, 'inputSchema', None) or getattr(tool_info, 'parameters', {})
-                        logger.info(f"🔧 Tool {tool_name} schema: {tool_schema}")
-                        
-                        # Create proxy tool function that calls the tool directly
                         def create_proxy_tool_fn(tl_name, proxy_url, expected_schema):
-                            def proxy_tool_fn(**kwargs) -> str:
-                                logger.info(f"🔧 EXECUTING TOOL: {tl_name} with args: {kwargs}")
+                            """Create a proxy function that handles parameter processing and validation"""
+                            
+                            # Create function with proper signature based on schema
+                            if expected_schema and isinstance(expected_schema, dict):
+                                properties = expected_schema.get('properties', {})
+                                required = expected_schema.get('required', [])
                                 
-                                # Use kwargs directly as the arguments
-                                # Remove any 'kwargs' wrapper if it exists from the LLM
-                                if 'kwargs' in kwargs and len(kwargs) == 1:
-                                    # LLM might wrap all args in a 'kwargs' field, unwrap it
-                                    inner_kwargs = kwargs['kwargs']
-                                    if isinstance(inner_kwargs, dict):
-                                        parsed_args = inner_kwargs
-                                        logger.info(f"🔧 Unwrapped kwargs field: {parsed_args}")
-                                    elif isinstance(inner_kwargs, str):
-                                        try:
-                                            parsed_args = json.loads(inner_kwargs)
-                                            logger.info(f"🔧 Parsed JSON from kwargs field: {parsed_args}")
-                                        except json.JSONDecodeError as e:
-                                            logger.error(f"🔧 Failed to parse JSON from kwargs field: {inner_kwargs}, error: {e}")
-                                            
-                                            # Enhanced parsing logic for various string formats
-                                            parsed_args = {}
-                                            
-                                            # Try to parse as query string format like "query=user:tesfayealex"
-                                            if '=' in inner_kwargs:
-                                                try:
-                                                    # Simple parsing for key=value pairs
-                                                    pairs = inner_kwargs.split('&') if '&' in inner_kwargs else [inner_kwargs]
-                                                    for pair in pairs:
-                                                        if '=' in pair:
-                                                            key, value = pair.split('=', 1)
-                                                            # Decode URL-encoded values if needed
-                                                            key = key.strip()
-                                                            value = value.strip()
-                                                            # Handle quoted values
-                                                            if value.startswith('"') and value.endswith('"'):
-                                                                value = value[1:-1]
-                                                            parsed_args[key] = value
-                                                    logger.info(f"🔧 Parsed query string format: {parsed_args}")
-                                                except Exception as parse_e:
-                                                    logger.error(f"🔧 Failed to parse as query string: {parse_e}")
-                                            
-                                            # If we still don't have args, try to extract from the tool name or description
-                                            if not parsed_args:
-                                                # For search tools, assume the string is a query
-                                                if 'search' in tl_name.lower():
-                                                    parsed_args = {'q': inner_kwargs}
-                                                    logger.info(f"🔧 Assumed search query: {parsed_args}")
-                                                elif 'query' in tl_name.lower():
-                                                    parsed_args = {'query': inner_kwargs}
-                                                    logger.info(f"🔧 Assumed query parameter: {parsed_args}")
-                                                else:
-                                                    # Last resort: try common parameter names
-                                                    logger.warning(f"🔧 Using fallback parameter parsing for: {inner_kwargs}")
-                                                    # Check if it looks like just a value without a key
-                                                    if inner_kwargs and not any(char in inner_kwargs for char in ['=', '{', '[', ':']):
-                                                        # Try common parameter names based on tool name
-                                                        if 'github' in tl_name.lower():
-                                                            if 'search' in tl_name.lower() and 'repo' in tl_name.lower():
-                                                                parsed_args = {'query': inner_kwargs}
-                                                            elif 'user' in tl_name.lower():
-                                                                parsed_args = {'q': f"user:{inner_kwargs}"}
-                                                            else:
-                                                                parsed_args = {'query': inner_kwargs}
-                                                        else:
-                                                            parsed_args = {'query': inner_kwargs}
-                                                        logger.info(f"🔧 Applied fallback parsing: {parsed_args}")
-                                    else:
-                                        # Handle non-string, non-dict values
-                                        logger.warning(f"🔧 Unexpected kwargs type: {type(inner_kwargs)}, value: {inner_kwargs}")
-                                        parsed_args = {}
-                                else:
-                                    # Use arguments directly
-                                    parsed_args = kwargs
-                                    logger.info(f"🔧 Using direct args: {parsed_args}")
+                                # Create function parameters dynamically
+                                sig_params = []
+                                annotations = {}
                                 
-                                # Validate that we have some arguments for tools that require them
-                                if not parsed_args:
-                                    logger.warning(f"🔧 No arguments parsed for tool {tl_name}, this may cause validation errors")
-                                    # For search tools, provide a helpful error message
-                                    if 'search' in tl_name.lower():
-                                        return f"Error: Search tools require a query parameter. Please provide what you want to search for."
+                                # FIRST: Process required parameters
+                                for param_name in required:
+                                    if param_name in properties:
+                                        param_info = properties[param_name]
+                                        param_type = param_info.get('type', 'string')
+                                        
+                                        # Map JSON schema types to Python types
+                                        if param_type == 'string':
+                                            python_type = str
+                                        elif param_type == 'integer':
+                                            python_type = int
+                                        elif param_type == 'number':
+                                            python_type = float
+                                        elif param_type == 'boolean':
+                                            python_type = bool
+                                        elif param_type == 'array':
+                                            python_type = List[Any]
+                                        else:
+                                            python_type = Any
+                                        
+                                        # Create required parameter (no default value)
+                                        param = inspect.Parameter(
+                                            param_name, 
+                                            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                                            annotation=python_type
+                                        )
+                                        sig_params.append(param)
+                                        annotations[param_name] = python_type
                                 
-                                async def async_call():
+                                # SECOND: Process optional parameters
+                                for param_name, param_info in properties.items():
+                                    if param_name not in required:  # Skip required ones (already processed)
+                                        param_type = param_info.get('type', 'string')
+                                        param_desc = param_info.get('description', '')
+                                        
+                                        # Map JSON schema types to Python types
+                                        if param_type == 'string':
+                                            python_type = str
+                                        elif param_type == 'integer':
+                                            python_type = int
+                                        elif param_type == 'number':
+                                            python_type = float
+                                        elif param_type == 'boolean':
+                                            python_type = bool
+                                        elif param_type == 'array':
+                                            python_type = List[Any]
+                                        else:
+                                            python_type = Any
+                                        
+                                        # Create optional parameter (with default None)
+                                        param = inspect.Parameter(
+                                            param_name, 
+                                            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                                            default=None,
+                                            annotation=Optional[python_type]
+                                        )
+                                        sig_params.append(param)
+                                        annotations[param_name] = Optional[python_type]
+                                
+                                # Create function signature
+                                signature = inspect.Signature(sig_params)
+                                
+                                def proxy_tool_fn(*args, **kwargs) -> str:
+                                    """The actual proxy function that calls the MCP tool using fastmcp client"""
+                                    logger.info(f"🔧 TOOL {tl_name} called with args: {args}, kwargs: {kwargs}")
+                                    
+                                    # Bind arguments to signature
                                     try:
-                                        transport = SSETransport(url=proxy_url)
-                                        async with Client(transport=transport) as client:
+                                        bound_args = signature.bind(*args, **kwargs)
+                                        bound_args.apply_defaults()
+                                        final_params = dict(bound_args.arguments)
+                                        
+                                        # Remove None values for optional parameters
+                                        final_params = {k: v for k, v in final_params.items() if v is not None}
+                                        
+                                    except TypeError as e:
+                                        logger.error(f"🚨 Parameter binding error for {tl_name}: {e}")
+                                        return f"Error: Invalid parameters. {str(e)}"
+                                    
+                                    logger.info(f"🔧 TOOL {tl_name} final parameters: {final_params}")
+                                    
+                                    import asyncio
+                                    import threading
+                                    
+                                    def run_in_thread():
+                                        async def async_call():
                                             try:
-                                                # Always use call_tool with arguments parameter
-                                                if parsed_args:
-                                                    result = await client.call_tool(tl_name, arguments=parsed_args)
-                                                else:
-                                                    result = await client.call_tool(tl_name)
-                                                return result
+                                                # Use the fastmcp client to call the tool properly
+                                                # Create a new client for this call
+                                                transport = SSETransport(url=proxy_url)
+                                                client = Client(transport=transport)
+                                                
+                                                async with client:
+                                                    logger.info(f"🔧 TOOL {tl_name} calling via fastmcp client.call_tool")
+                                                    result = await client.call_tool(tl_name, arguments=final_params)
+                                                    logger.info(f"🔧 TOOL {tl_name} RESULT: {result}")
+                                                    
+                                                    # Process result - fastmcp returns different structure
+                                                    if hasattr(result, 'content'):
+                                                        # Handle structured result
+                                                        if hasattr(result.content, 'text'):
+                                                            return result.content.text
+                                                        elif isinstance(result.content, list) and len(result.content) > 0:
+                                                            # Handle list of content items
+                                                            return str(result.content[0].text if hasattr(result.content[0], 'text') else result.content[0])
+                                                        else:
+                                                            return str(result.content)
+                                                    else:
+                                                        return str(result)
+                                                        
                                             except Exception as e:
-                                                logger.error(f"🔧 Error calling tool {tl_name}: {e}")
-                                                return {"error": f"Error executing tool {tl_name}: {str(e)}"}
-                                    except Exception as e:
-                                        logger.error(f"🔧 Error connecting to MCP proxy for tool {tl_name}: {e}")
-                                        return {"error": f"Error connecting to MCP proxy: {str(e)}"}
-
-                                def run_in_thread():
-                                    new_loop = asyncio.new_event_loop()
-                                    asyncio.set_event_loop(new_loop)
-                                    try:
-                                        result = new_loop.run_until_complete(async_call())
-                                        return result
-                                    finally:
-                                        new_loop.close()
+                                                logger.error(f"🚨 Error calling tool {tl_name}: {e}")
+                                                return f"Error calling tool {tl_name}: {str(e)}"
+                                        
+                                        # Try to run in existing event loop, fallback to new loop
+                                        try:
+                                            loop = asyncio.get_running_loop()
+                                            future = asyncio.run_coroutine_threadsafe(async_call(), loop)
+                                            return future.result(timeout=120)
+                                        except RuntimeError:
+                                            # No running loop, create new one
+                                            return asyncio.run(async_call())
+                                    
+                                    # Execute the actual call
+                                    return run_in_thread()
                                 
-                                try:
-                                    with concurrent.futures.ThreadPoolExecutor() as executor:
-                                        future = executor.submit(run_in_thread)
-                                        result = future.result(timeout=60)
-                                except concurrent.futures.TimeoutError:
-                                    logger.error(f"🔧 Timeout (60s) waiting for {tl_name} to complete")
-                                    return f"Error: Tool {tl_name} timed out after 60 seconds"
-                                except Exception as e:
-                                    logger.error(f"🔧 Error in thread execution for {tl_name}: {e}")
-                                    return f"Error executing {tl_name}: {str(e)}"
+                                # Set the signature on the function
+                                proxy_tool_fn.__signature__ = signature
+                                proxy_tool_fn.__annotations__ = annotations
                                 
-                                logger.info(f"🔧 TOOL {tl_name} RESULT: {result}")
-                                
-                                # Process result
-                                if isinstance(result, dict):
-                                    if result.get("error"):
-                                        return f"Error: {result['error']}"
-                                    elif result.get("result"):
-                                        return str(result["result"])
-                                    else:
-                                        return str(result)
-                                else:
-                                    return str(result)
+                            else:
+                                # Fallback for tools without schema - simple **kwargs function
+                                def proxy_tool_fn(**kwargs) -> str:
+                                    """Simple proxy function for tools without schema"""
+                                    logger.info(f"🔧 TOOL {tl_name} (no schema) called with kwargs: {kwargs}")
+                                    
+                                    import asyncio
+                                    import threading
+                                    
+                                    def run_in_thread():
+                                        async def async_call():
+                                            try:
+                                                # Use the fastmcp client to call the tool properly
+                                                transport = SSETransport(url=proxy_url)
+                                                client = Client(transport=transport)
+                                                
+                                                async with client:
+                                                    logger.info(f"🔧 TOOL {tl_name} calling via fastmcp client.call_tool")
+                                                    result = await client.call_tool(tl_name, arguments=kwargs)
+                                                    logger.info(f"🔧 TOOL {tl_name} RESULT: {result}")
+                                                    
+                                                    # Process result - fastmcp returns different structure
+                                                    if hasattr(result, 'content'):
+                                                        # Handle structured result
+                                                        if hasattr(result.content, 'text'):
+                                                            return result.content.text
+                                                        elif isinstance(result.content, list) and len(result.content) > 0:
+                                                            # Handle list of content items
+                                                            return str(result.content[0].text if hasattr(result.content[0], 'text') else result.content[0])
+                                                        else:
+                                                            return str(result.content)
+                                                    else:
+                                                        return str(result)
+                                                        
+                                            except Exception as e:
+                                                logger.error(f"🚨 Error calling tool {tl_name}: {e}")
+                                                return f"Error calling tool {tl_name}: {str(e)}"
+                                        
+                                        try:
+                                            loop = asyncio.get_running_loop()
+                                            future = asyncio.run_coroutine_threadsafe(async_call(), loop)
+                                            return future.result(timeout=120)
+                                        except RuntimeError:
+                                            return asyncio.run(async_call())
+                                    
+                                    return run_in_thread()
                             
                             return proxy_tool_fn
                         
                         # Create the tool with proper parameters handling
-                        proxy_tool = FunctionTool.from_defaults(
-                            fn=create_proxy_tool_fn(tool_name, mcp_proxy_url, tool_schema),
-                            name=tool_name,
-                            description=tool_description,
-                        )
+                        # Create function schema from the MCP tool schema for LlamaIndex
+                        fn_schema = None
+                        print("started if condition")
+                        if tool_schema and isinstance(tool_schema, dict):
+                            try:
+                                properties = tool_schema.get('properties', {})
+                                required = tool_schema.get('required', [])
+                                print(f"processing tool {tool_name} with {len(properties)} properties")
+                                
+                                # Build Pydantic model for the function schema
+                                pydantic_fields = {}
+                                
+                                # FIRST: Process required parameters
+                                for param_name in required:
+                                    if param_name in properties:
+                                        param_info = properties[param_name]
+                                        param_type = param_info.get('type', 'string')
+                                        param_desc = param_info.get('description', '')
+                                        
+                                        print(f"  param {param_name}: type={param_type}, required=True")
+                                        
+                                        # Map JSON schema types to Python types
+                                        if param_type == 'string':
+                                            python_type = str
+                                        elif param_type == 'integer':
+                                            python_type = int
+                                        elif param_type == 'number':
+                                            python_type = float
+                                        elif param_type == 'boolean':
+                                            python_type = bool
+                                        elif param_type == 'array':
+                                            python_type = List[Any]
+                                        else:
+                                            python_type = Any
+                                        
+                                        pydantic_fields[param_name] = (python_type, Field(description=param_desc))
+                                
+                                # SECOND: Process optional parameters
+                                for param_name, param_info in properties.items():
+                                    if param_name not in required:  # Skip required ones (already processed)
+                                        param_type = param_info.get('type', 'string')
+                                        param_desc = param_info.get('description', '')
+                                        
+                                        print(f"  param {param_name}: type={param_type}, required=False")
+                                        
+                                        # Map JSON schema types to Python types
+                                        if param_type == 'string':
+                                            python_type = str
+                                        elif param_type == 'integer':
+                                            python_type = int
+                                        elif param_type == 'number':
+                                            python_type = float
+                                        elif param_type == 'boolean':
+                                            python_type = bool
+                                        elif param_type == 'array':
+                                            python_type = List[Any]
+                                        else:
+                                            python_type = Any
+                                        
+                                        pydantic_fields[param_name] = (Optional[python_type], Field(default=None, description=param_desc))
+                                
+                                print(f"created pydantic_fields: {list(pydantic_fields.keys())}")
+                                
+                                if pydantic_fields:
+                                    # Create a Pydantic model for the function parameters
+                                    print(f"creating pydantic model for {tool_name}")
+                                    FnSchema = create_model(f"{tool_name}Schema", **pydantic_fields)
+                                    fn_schema = FnSchema
+                                    print(f"successfully created pydantic model for {tool_name}")
+                                else:
+                                    print(f"no pydantic fields for {tool_name}")
+                            except Exception as e:
+                                logger.error(f"Error creating schema for {tool_name}: {e}")
+                                print(f"Error in schema creation for {tool_name}: {e}")
+                                fn_schema = None
                         
+                        print(f"about to create FunctionTool for {tool_name}, fn_schema={fn_schema is not None}")
+                        try:
+                            proxy_tool = FunctionTool.from_defaults(
+                                fn=create_proxy_tool_fn(tool_name, mcp_proxy_url, tool_schema),
+                                name=tool_name,
+                                description=tool_description,
+                                fn_schema=fn_schema  # Add the schema here!
+                            )
+                            print(f"successfully created FunctionTool for {tool_name}")
+                        except Exception as e:
+                            logger.error(f"Error creating FunctionTool for {tool_name}: {e}")
+                            print(f"Error creating FunctionTool for {tool_name}: {e}")
+                            # Try creating without schema as fallback
+                            try:
+                                print(f"trying fallback without schema for {tool_name}")
+                                proxy_tool = FunctionTool.from_defaults(
+                                    fn=create_proxy_tool_fn(tool_name, mcp_proxy_url, tool_schema),
+                                    name=tool_name,
+                                    description=tool_description
+                                )
+                                print(f"fallback successful for {tool_name}")
+                            except Exception as e2:
+                                logger.error(f"Even fallback failed for {tool_name}: {e2}")
+                                print(f"Even fallback failed for {tool_name}: {e2}")
+                                continue  # Skip this tool
+                        
+                        print("ended if function")
                         all_tools.append(proxy_tool)
                         
         except Exception as e:

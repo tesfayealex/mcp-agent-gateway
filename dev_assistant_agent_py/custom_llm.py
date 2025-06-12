@@ -9,7 +9,7 @@ from llama_index.core.llms import (
 )
 from llama_index.core.llms.function_calling import FunctionCallingLLM
 from llama_index.core.llms.llm import ToolSelection
-from llama_index.core.llms.callbacks import llm_completion_callback
+from llama_index.core.llms.callbacks import llm_completion_callback, llm_chat_callback
 from llama_index.core.base.llms.types import (
     ChatMessage,
     ChatResponse,
@@ -106,7 +106,7 @@ class GeminiCustomLLM(FunctionCallingLLM):
             })
         return history
 
-    @llm_completion_callback()
+    @llm_chat_callback()
     def chat(self, messages: Sequence[ChatMessage], **kwargs: Any) -> ChatResponse:
         # Prepare configuration with system instruction if available
         config = None
@@ -209,6 +209,7 @@ class GeminiCustomLLM(FunctionCallingLLM):
         
         return gen()
 
+    @llm_completion_callback()
     def complete(self, prompt: str, formatted: bool = False, **kwargs: Any) -> CompletionResponse:
         # Prepare configuration
         config = None
